@@ -1,0 +1,41 @@
+{
+  "name": "webapp-qa-kit",
+  "version": "0.1.0",
+  "description": "Seeded, guard-railed monkey testing for web apps in a real browser. Every finding replays from its seed; a run that could not reach the page it asked for fails instead of passing.",
+  "keywords": [
+    "qa",
+    "monkey-testing",
+    "chaos",
+    "e2e",
+    "playwright",
+    "cdp",
+    "fuzzing",
+    "accessibility"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "webapp-qa": "./bin/webapp-qa.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./presets": "./src/presets.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
