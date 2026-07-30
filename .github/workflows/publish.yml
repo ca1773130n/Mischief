@@ -18,12 +18,11 @@ name: publish
 on:
   release:
     types: [published]
+  # Manual runs ALWAYS dry-run. A publish is only ever triggered by cutting a
+  # release, so there is no combination of clicks in the Actions UI that ships a
+  # version by accident — the first draft of this file defaulted a `dry_run`
+  # input to false, which made "Run workflow" on a whim a real publish.
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Pack and verify without publishing'
-        type: boolean
-        default: false
 
 jobs:
   publish:
@@ -66,10 +65,13 @@ jobs:
             echo "::error::origin-app residue in the tarball"; exit 1
           fi
 
+      # No credential of any kind is referenced here. npm mints a short-lived one
+      # for this workflow in this repository from the OIDC token, and attaches a
+      # provenance attestation as a side effect.
       - name: Publish
-        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
+        if: ${{ github.event_name == 'release' }}
         run: npm publish
 
-      - name: Dry run
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      - name: Dry run (manual dispatch)
+        if: ${{ github.event_name != 'release' }}
         run: npm publish --dry-run
