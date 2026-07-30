@@ -173,5 +173,20 @@ export function resolveConfig(fileConfig = {}, overrides = {}, cwd = process.cwd
     );
   }
 
+  // Context options cannot be applied to a context that already exists. In attach
+  // mode we adopt the running browser's default context, so anything passed to
+  // newContext() is silently dropped — the same structural limit that makes
+  // auth.strategy 'storageState' unavailable there. Left unsaid, a self-signed dev
+  // cert turns every route into ERR_CERT_AUTHORITY_INVALID and the run fails
+  // closed with a browser error, which is honest but tells you nothing about the
+  // setting that did not take.
+  if (cfg.browser.mode === 'attach' && cfg.browser.ignoreHTTPSErrors) {
+    cfg.warnings.push(
+      `browser.ignoreHTTPSErrors has no effect in attach mode — it is a context option, and attach adopts the ` +
+        `browser's existing context. A self-signed certificate will fail every navigation. Either launch Chrome ` +
+        `with --ignore-certificate-errors, accept the certificate once in that profile, or use mode: 'launch'.`,
+    );
+  }
+
   return cfg;
 }

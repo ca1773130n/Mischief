@@ -273,6 +273,15 @@ config keeps its `requiresAuth` and `waitFor`.
 `localStorage` covers Supabase-style clients that use a custom `storageKey`, and
 anything else that keeps its session in web storage rather than a cookie.
 
+**`browser.ignoreHTTPSErrors` has the same limitation, for the same reason.** It
+is a `newContext()` option, and attach adopts a context that already exists, so
+it is dropped. A dev server on a self-signed certificate then fails every
+navigation with `ERR_CERT_AUTHORITY_INVALID`; the run correctly reports NOT
+VERIFIED, but the setting that did not take is not obvious from a cert error. The
+config now warns about the combination. Start Chrome with
+`--ignore-certificate-errors`, accept the certificate once in that profile, or
+use `mode: 'launch'`.
+
 Capturing a session: open a signed-in tab, copy the value out of devtools, save
 it to a gitignored path, point `auth.from` at it. **Never commit that file.** It
 is a live credential; treat it exactly like one. Nothing in this package writes

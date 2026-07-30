@@ -151,6 +151,28 @@ test('requiresAuth without waitFor WARNS — it must never refuse to run', () =>
   assert.match(cfg.warnings[0], /waitFor/);
 });
 
+test('attach mode WARNS that ignoreHTTPSErrors cannot apply — found by a live run', () => {
+  // A real run against a Vite dev server on a self-signed cert failed every
+  // navigation with ERR_CERT_AUTHORITY_INVALID while the config plainly said
+  // ignoreHTTPSErrors: true. The setting is a newContext() option and attach
+  // adopts an existing context, so it was dropped in silence.
+  const attach = resolveConfig({ baseUrl: 'http://localhost:3000', browser: { mode: 'attach', ignoreHTTPSErrors: true } });
+  assert.equal(attach.warnings.length, 1);
+  assert.match(attach.warnings[0], /ignoreHTTPSErrors/);
+  assert.match(attach.warnings[0], /attach/);
+
+  // Launch mode applies it, so there is nothing to say.
+  assert.equal(
+    resolveConfig({ baseUrl: 'http://localhost:3000', browser: { mode: 'launch', ignoreHTTPSErrors: true } }).warnings.length,
+    0,
+  );
+  // Nor when the option is off in attach mode.
+  assert.equal(
+    resolveConfig({ baseUrl: 'http://localhost:3000', browser: { mode: 'attach', ignoreHTTPSErrors: false } }).warnings.length,
+    0,
+  );
+});
+
 test('a gated route with waitFor warns about nothing, and warnings always exists', () => {
   // Reporters read config.warnings unconditionally, so the field must be an array
   // even on a default config.
