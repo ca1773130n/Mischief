@@ -1,0 +1,75 @@
+name: publish
+
+# Trusted publishing (OIDC). No NPM_TOKEN, no 2FA prompt, no long-lived secret
+# anywhere in this repo — npm verifies the identity of THIS workflow in THIS
+# repository and issues a short-lived credential for the publish itself.
+#
+# npm cannot attach a trusted publisher to a package that does not exist, so
+# version 0.1.0 is bootstrapped with a local `npm publish`. Everything after it
+# goes through here and carries a provenance attestation automatically.
+#
+# The npm side must match this file exactly:
+#   npmjs.com -> package -> Settings -> Trusted Publisher -> GitHub Actions
+#     Organization or user: ca1773130n
+#     Repository:           Mischief
+#     Workflow filename:    publish.yml
+#     Environment:          (leave empty — this workflow declares none)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack and verify without publishing'
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # The whole mechanism. Without id-token: write the runner cannot mint the
+      # OIDC token and npm falls back to asking for credentials it will not get.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The suite runs on node:test's --test glob, which needs >= 21, while
+          # the package itself supports >= 18 (see engines).
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      # setup-node pins whatever npm shipped with the Node build; OIDC needs
+      # >= 11.5.1, so ask for it explicitly rather than hoping.
+      - name: Ensure an npm that speaks OIDC
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - run: npm ci
+
+      # Browser suites are not optional — several of the verification gates in
+      # this package are only exercised against real Chromium.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - run: npm test
+
+      - name: Verify the tarball carries no real host or credential
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          if grep -qiE 'hypepaper|burningxoul' /tmp/pack.txt; then
+            echo "::error::origin-app residue in the tarball"; exit 1
+          fi
+
+      - name: Publish
+        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
+        run: npm publish
+
+      - name: Dry run
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: npm publish --dry-run
