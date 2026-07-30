@@ -120,6 +120,13 @@ export default defineConfig({
     // because it is a business rule, and the day the plan model changes this is
     // the line to edit.
     classifyResponse: ({ status, url }) => {
+      // Billing is built but deliberately not switched on yet, so its endpoints
+      // 500 by design. Classified as a gate — visible in the report's Gates
+      // section, not counted as a defect — because a run against /pricing would
+      // otherwise be permanently exit 2 and the first real 5xx would arrive in a
+      // report already full of red. DELETE THIS BRANCH the day billing opens; a
+      // silenced endpoint that nobody un-silences is how a real outage hides.
+      if (status >= 500 && /\/api\/v\d+\/billing\//.test(url)) return 'gate';
       if (status >= 500) return 'critical';
       if (status === 402 || status === 403) return 'gate';
       if (status === 401 && /login|signin|sign-in|auth|session|oauth/i.test(url)) return 'gate';
