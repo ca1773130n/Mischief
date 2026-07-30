@@ -523,3 +523,25 @@ test('runMonkey: a trailing-slash redirect is not drift, a locale prefix is', as
     fs.rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+// ------------------------------------------- self-inflicted perf (harness, not app)
+
+// A real run reported "LCP 29.4s > 4.0s" as a MEDIUM app finding on a route whose
+// slow-request lines were all annotated "(during slow-3G window)". collectPerf runs
+// at exit too and keeps max(), so a `refresh` inside the harness's own throttle sets
+// the worst sample and it survives to the report unlabelled.
+test('a perf sample taken under the harness throttle is demoted and labelled', () => {
+  const degraded = ps('/a', { steps: 10, clickable: clicked(), perf: { lcp: 29400, cls: 0.5, dcl: 0, load: 0 }, netDegraded: true });
+  const f = Object.fromEntries(summarize([degraded], state(), cfg()).findings.map((x) => [x.kind, x]));
+  assert.equal(f.lcp.severity, 'low');
+  assert.equal(f.cls.severity, 'low');
+  assert.match(f.lcp.message, /harness was throttling/);
+});
+
+test('an honest perf sample keeps its MEDIUM and says nothing about throttling', () => {
+  const clean = ps('/a', { steps: 10, clickable: clicked(), perf: { lcp: 29400, cls: 0.5, dcl: 0, load: 0 }, netDegraded: false });
+  const f = Object.fromEntries(summarize([clean], state(), cfg()).findings.map((x) => [x.kind, x]));
+  assert.equal(f.lcp.severity, 'medium');
+  assert.equal(f.cls.severity, 'medium');
+  assert.doesNotMatch(f.lcp.message, /throttling/);
+});

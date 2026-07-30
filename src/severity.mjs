@@ -263,9 +263,16 @@ export function summarize(statsList, state, config) {
       add('low', 'slow-requests-dropped', ps.page, `${ps.slowRequestsDropped} further slow request(s) past report.slowRequestCap (${config.report.slowRequestCap}) were counted, not stored`);
 
     for (const t of ps.consoleErrors) add('medium', 'console-error', ps.page, trunc(t, 160));
-    if (ps.perf.cls > config.thresholds.cls) add('medium', 'cls', ps.page, `CLS ${ps.perf.cls.toFixed(3)} > ${config.thresholds.cls}`);
+    // A perf sample taken while the harness held the network at Slow-3G or
+    // offline measures the stressor, not the app. Demoted to 'low' and labelled
+    // rather than dropped: the number is still real, it just cannot be read as a
+    // page-speed defect. (slowRequests has carried this distinction all along.)
+    if (ps.perf.cls > config.thresholds.cls)
+      add(ps.netDegraded ? 'low' : 'medium', 'cls', ps.page,
+        `CLS ${ps.perf.cls.toFixed(3)} > ${config.thresholds.cls}${ps.netDegraded ? ' — measured while the harness was throttling; not an app finding' : ''}`);
     if (ps.perf.lcp > config.thresholds.lcpMs)
-      add('medium', 'lcp', ps.page, `LCP ${(ps.perf.lcp / 1000).toFixed(1)}s > ${(config.thresholds.lcpMs / 1000).toFixed(1)}s`);
+      add(ps.netDegraded ? 'low' : 'medium', 'lcp', ps.page,
+        `LCP ${(ps.perf.lcp / 1000).toFixed(1)}s > ${(config.thresholds.lcpMs / 1000).toFixed(1)}s${ps.netDegraded ? ' — measured while the harness was throttling; not an app finding' : ''}`);
     for (const s of ps.slowRequests) if (!s.throttled) add('medium', 'slow-request', ps.page, `${(s.ms / 1000).toFixed(1)}s ${s.url}`);
     for (const f of ps.stepFailures) add('medium', 'step-failure', ps.page, `${f.mutator}: ${trunc(f.error, 120)}`);
     if (ps.gotoNote) add('medium', 'goto', ps.page, ps.gotoNote);

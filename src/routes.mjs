@@ -97,6 +97,9 @@ export function newRouteStats(route) {
     slowRequests: [],
     slowRequestsDropped: 0,
     perf: { lcp: 0, cls: 0, dcl: 0, load: 0 },
+    // Sticky: the harness throttled or disconnected at some point on this route,
+    // so its max() perf samples measure the stressor rather than the page.
+    netDegraded: false,
     // What the monkey was actually offered to click. `atEnter: null` means the
     // census never ran; `probeFailed` means it threw. Neither is the same as 0,
     // and conflating them is how a broken probe would manufacture the very

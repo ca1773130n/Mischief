@@ -208,8 +208,16 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     }
   }
   for (const ps of statsList) {
-    if (ps.perf.cls > config.thresholds.cls) L.push(`- CLS ${ps.perf.cls.toFixed(3)} > ${config.thresholds.cls} on ${ps.page}`);
-    if (ps.perf.lcp > config.thresholds.lcpMs) L.push(`- LCP ${fmtLcp(ps.perf.lcp)} > ${fmtLcp(config.thresholds.lcpMs)} on ${ps.page}`);
+    // Perf lines are rendered ONLY when the sample is trustworthy. A route where
+    // the harness throttled or went offline produces a max() LCP that measures
+    // the stressor, and summarize() already demotes those to 'low' with a label —
+    // this section used to re-derive the threshold from ps.perf directly and so
+    // printed the self-inflicted number under MEDIUM regardless. Two sources of
+    // truth for one verdict, and the human-readable one was the wrong one.
+    if (!ps.netDegraded) {
+      if (ps.perf.cls > config.thresholds.cls) L.push(`- CLS ${ps.perf.cls.toFixed(3)} > ${config.thresholds.cls} on ${ps.page}`);
+      if (ps.perf.lcp > config.thresholds.lcpMs) L.push(`- LCP ${fmtLcp(ps.perf.lcp)} > ${fmtLcp(config.thresholds.lcpMs)} on ${ps.page}`);
+    }
     for (const s of ps.slowRequests.slice(0, 10)) {
       L.push(`- slow request ${(s.ms / 1000).toFixed(1)}s on ${ps.page}: ${s.url}${s.throttled ? ' (during slow-3G window)' : ''}`);
     }
@@ -251,6 +259,14 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
   L.push('### LOW');
   L.push('');
   for (const ps of statsList) {
+    // The throttled counterparts of the MEDIUM perf lines above. Kept, not
+    // dropped: the measurement is real and worth seeing, it just describes the
+    // harness's own slow-3G window rather than the page.
+    if (ps.netDegraded) {
+      const why = ' — measured while the harness was throttling; not an app finding';
+      if (ps.perf.cls > config.thresholds.cls) L.push(`- CLS ${ps.perf.cls.toFixed(3)} > ${config.thresholds.cls} on ${ps.page}${why}`);
+      if (ps.perf.lcp > config.thresholds.lcpMs) L.push(`- LCP ${fmtLcp(ps.perf.lcp)} > ${fmtLcp(config.thresholds.lcpMs)} on ${ps.page}${why}`);
+    }
     if (ps.clickable && ps.clickable.capped) {
       L.push(
         `- ${ps.page}: at least guardrails.maxCandidates (${config.guardrails.maxCandidates}) controls matched; ` +

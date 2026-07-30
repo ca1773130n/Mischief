@@ -173,7 +173,8 @@ async function offlineMode(ctx) {
   // try/finally, because the flag is set BEFORE the CDP call that can throw. A
   // failed emulation used to leave the whole rest of the run tagged as
   // self-inflicted, which suppresses every later request-failure finding.
-  ctx.state.offlineWindow = true; // the requestfailed collector tags failures inside this window as self-inflicted
+  ctx.state.offlineWindow = true;
+  ctx.state.ps.netDegraded = true; // this route's perf maxima are now suspect
   try {
     await ctx.cdp.send('Network.emulateNetworkConditions', ctx.config.network.offline);
     ctx.log('offlineMode', '-', `offline ${(ms / 1000).toFixed(1)}s + one click`);
@@ -192,6 +193,7 @@ async function slowNetwork(ctx) {
   // Throttling a single step would only ever slow down this mutator itself.
   const n = ctx.config.mutators.options.slowSteps;
   ctx.state.slowStepsRemaining = n;
+  ctx.state.ps.netDegraded = true; // this route's perf maxima are now suspect
   await ctx.cdp.send('Network.emulateNetworkConditions', ctx.config.network.slow3g);
   ctx.log('slowNetwork', '-', `Slow-3G for next ${n} steps`);
 }

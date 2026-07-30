@@ -45,6 +45,12 @@ export function wireCollectors(page, state, baseOrigin, config) {
     if (type !== 'error' && type !== 'warning') return;
     const text = msg.text();
     if (ignore.some((re) => re.test(text))) return;
+    // A console error logged while the harness holds the connection offline is
+    // the offlineMode mutator's own doing — ERR_INTERNET_DISCONNECTED is what it
+    // exists to provoke. requestFailures have carried an `offline` tag from the
+    // start; console output did not, so the same self-inflicted event was a
+    // finding in one channel and noise in the other.
+    if (state.offlineWindow) return;
     const bucket = type === 'error' ? state.ps.consoleErrors : state.ps.consoleWarnings;
     // Cap, then COUNT the rest. A storm of one repeated error must not blow up
     // memory, and must not be silently invisible either.

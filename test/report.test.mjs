@@ -312,3 +312,23 @@ test('a config warning lands in a trailing Notes section', () => {
   assert.ok(md.includes('- route /dash declares requiresAuth but has no waitFor.'));
   assert.ok(md.indexOf('## Notes') > md.indexOf('## Skipped danger'), 'headings are only ever added at the end');
 });
+
+test('a throttled perf sample renders under LOW with its reason, never MEDIUM', () => {
+  // The markdown section re-derived the LCP/CLS threshold from ps.perf instead of
+  // reading summarize()'s verdict, so a sample summarize had already demoted to
+  // 'low' still printed under MEDIUM. Two sources of truth, and the one a human
+  // reads was the wrong one.
+  const perf = { lcp: 29400, cls: 0.9, dcl: 0, load: 0 };
+  const cut = (md) => ({
+    medium: md.slice(md.indexOf('### MEDIUM'), md.indexOf('### LOW')),
+    low: md.slice(md.indexOf('### LOW')),
+  });
+
+  const { md } = fixture({ ps: { steps: 5, perf, netDegraded: true } });
+  assert.match(cut(md).low, /LCP 29\.4s.*harness was throttling/);
+  assert.doesNotMatch(cut(md).medium, /LCP 29\.4s/);
+
+  const honest = fixture({ ps: { steps: 5, perf, netDegraded: false } });
+  assert.match(cut(honest.md).medium, /LCP 29\.4s/);
+  assert.doesNotMatch(cut(honest.md).low, /LCP 29\.4s/);
+});

@@ -32,7 +32,18 @@ async function safeEval(page, fn, arg, fallback) {
   }
 }
 
-/** Perf is accumulated across the route with max(), because SPA nav resets nothing. */
+/**
+ * Perf is accumulated across the route with max(), because SPA nav resets nothing.
+ *
+ * max() means the WORST sample survives to the report, and the worst sample is
+ * very often one the harness caused: a `refresh` inside a slow-3G window reloads
+ * the page over a 500kbit pipe and hands back an LCP of half a minute. Whether
+ * that happened is tracked per ROUTE (ps.netDegraded), not per sample — the
+ * PerformanceObserver records the value during the throttled load, but this
+ * function reads it at exit, by which point the run loop has already restored
+ * the network. A read-time flag is therefore always false exactly when it
+ * matters.
+ */
 export async function collectPerf(page, ps) {
   const p = await safeEval(page, perfInPage, undefined, null);
   if (!p) return;
