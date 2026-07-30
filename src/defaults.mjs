@@ -181,6 +181,13 @@ export const DEFAULT_CONFIG = {
     // line saying the API was never looked at. The watched set is printed in the
     // report header. classifyResponse (below) sees every response either way.
     watchOrigins: [],
+    // A watched origin that never answered once and failed at least this many
+    // times is treated as DOWN — the run is unverified rather than critical.
+    // Not 1: a single 5xx from an origin contacted exactly once is as likely to
+    // be one broken endpoint as a dead host, and demoting a real CRITICAL to
+    // "could not test" on that evidence would hide the bug this package exists
+    // to surface. Set to 0 to disable the rule.
+    deadOriginMinFailures: 3,
     classifyResponse: null, // ({ status, url, method, watched }) => 'critical'|'high'|'gate'|'ignore'
     slow3g: SLOW_3G,
     normal: NET_NORMAL,

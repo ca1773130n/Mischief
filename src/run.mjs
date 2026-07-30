@@ -68,6 +68,7 @@ export async function runMonkey(config, { onLog } = {}) {
     actionLog: [],
     skippedDanger: [],
     gates: [],
+    originStats: {}, // watched origin -> { ok, fail }; see the dead-origin rule in severity.mjs
     authed: false,
     verified: true,
     verification: null,
@@ -354,7 +355,7 @@ export async function runMonkey(config, { onLog } = {}) {
     // unguarded coverage verdict would overwrite "session verification FAILED on
     // /x" with the generic "NOTHING WAS TESTED".
     if (state.verified !== false) {
-      const reasons = unverifiedReasons(statsList, summary, config);
+      const reasons = unverifiedReasons(statsList, summary, config, state);
       if (reasons.length) {
         state.verified = false;
         state.unverifiedReason = reasons.join(' ');

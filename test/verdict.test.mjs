@@ -138,6 +138,48 @@ test('scan truncation, a config cap and a crashed census are each reported disti
   assert.equal(s.tot.noClickable, 0);
 });
 
+// ------------------------------------------------- dead watched origin (env, not app)
+
+// A real run against a Vite dev server whose backend was not started reported 4
+// CRITICAL and exit 2 — one per proxied endpoint — blaming the app for the
+// environment. Zero successes from a watched origin is the signal.
+const withOrigins = (originStats) => Object.assign(state(), { originStats });
+const live = [ps('/a', { steps: 40, clickable: clicked() })];
+
+test('a watched origin that never answered is unverified, not critical', () => {
+  const st = withOrigins({ 'http://localhost:8000/api': { ok: 0, fail: 4 } });
+  const reasons = unverifiedReasons(live, summarize(live, st, cfg()), cfg(), st);
+  assert.equal(reasons.length, 1);
+  assert.match(reasons[0], /localhost:8000/);
+  assert.match(reasons[0], /down rather than buggy/);
+  assert.match(reasons[0], /deadOriginMinFailures/);
+});
+
+test('one broken endpoint among working ones stays CRITICAL — the over-fire guard', () => {
+  // The outcome that must not be lost: an origin that IS answering, with a
+  // genuinely 500ing endpoint, is an app defect and has to keep its exit 2.
+  const st = withOrigins({ 'http://localhost:8000/api': { ok: 37, fail: 4 } });
+  assert.deepEqual(unverifiedReasons(live, summarize(live, st, cfg()), cfg(), st), []);
+});
+
+test('too few failures to conclude, and never-contacted origins, stay quiet', () => {
+  const one = withOrigins({ 'http://localhost:8000/api': { ok: 0, fail: 1 } });
+  assert.deepEqual(unverifiedReasons(live, summarize(live, one, cfg()), cfg(), one), []);
+  const untouched = withOrigins({ 'http://localhost:8000/api': { ok: 0, fail: 0 } });
+  assert.deepEqual(unverifiedReasons(live, summarize(live, untouched, cfg()), cfg(), untouched), []);
+});
+
+test('deadOriginMinFailures: 0 disables the rule', () => {
+  const st = withOrigins({ 'http://localhost:8000/api': { ok: 0, fail: 99 } });
+  const c = cfg({ network: { deadOriginMinFailures: 0 } });
+  assert.deepEqual(unverifiedReasons(live, summarize(live, st, c), c, st), []);
+});
+
+test('unverifiedReasons tolerates a caller that passes no state', () => {
+  // run.mjs passes state, but the export is public and the old arity must not throw.
+  assert.deepEqual(unverifiedReasons(live, summarize(live, state(), cfg()), cfg()), []);
+});
+
 // ------------------------------------------------------------ unverifiedReasons
 
 test('a run where NO route offered a click is unverified, and names the remedy', () => {

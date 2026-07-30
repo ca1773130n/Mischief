@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { stripQuery, trunc } from './util.mjs';
+import { pathOf, stripQuery, trunc } from './util.mjs';
 
 /**
  * Default response classification.
@@ -107,6 +107,31 @@ export function wireCollectors(page, state, baseOrigin, config) {
     try {
       const url = res.url();
       const status = res.status();
+
+      // Liveness, counted BEFORE the <400 early return — successes are the whole
+      // signal and nothing else records them. A subtree that answered every
+      // request with 5xx and never once succeeded is a dependency that is down,
+      // not an app with bugs: a dev server proxying /api to a backend nobody
+      // started reports one CRITICAL per endpoint and exit 2, blaming the app
+      // for the environment.
+      //
+      // Scoped to origin + FIRST PATH SEGMENT, not origin alone. Under a proxy
+      // the dead backend never appears as its own origin — the browser only
+      // ever talks to the dev server, which is serving pages perfectly well —
+      // so origin-level liveness sees a healthy host with a few broken routes
+      // and cannot tell the two apart. The segment is taken from observed
+      // traffic, never assumed: '/api' emerges because that is what the app
+      // requested, and an app that mounts its backend elsewhere gets whatever
+      // it actually uses. 5xx is the only failure counted; a 404 means the
+      // server is alive and answering, which is what this is establishing.
+      const origin = watched.find((o) => url.startsWith(o));
+      if (origin) {
+        const key = origin + '/' + (pathOf(url).split('/')[1] || '');
+        const s = state.originStats[key] || (state.originStats[key] = { ok: 0, fail: 0 });
+        if (status >= 500) s.fail++;
+        else s.ok++;
+      }
+
       if (status < 400) return;
       // Everything reaches classify(), including cross-origin. Returning early on
       // `!url.startsWith(baseOrigin)` made network.classifyResponse — documented as

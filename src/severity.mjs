@@ -100,10 +100,29 @@ function shadowHint(statsList) {
  * be both partly unreached and wholly unclickable), and a run-level verdict
  * spread across several call sites is how the zero-step false green survived.
  */
-export function unverifiedReasons(statsList, summary, config) {
+export function unverifiedReasons(statsList, summary, config, state = {}) {
   const out = [];
   const nothing = unverifiedCoverageReason(statsList);
   if (nothing) out.push(nothing);
+
+  // A watched origin that answered NOTHING and failed repeatedly is a dependency
+  // that is down. Every finding it produced is one CRITICAL per endpoint blaming
+  // the app for a backend nobody started — the inverse of a false green and the
+  // same category error: reporting on an app the run could not actually exercise.
+  // Requires zero successes, so one broken endpoint among working ones stays
+  // CRITICAL, which is the outcome that must not be lost.
+  const minFail = config.network.deadOriginMinFailures;
+  if (minFail > 0) {
+    const dead = Object.entries(state.originStats || {}).filter(([, s]) => s.ok === 0 && s.fail >= minFail);
+    if (dead.length) {
+      out.push(
+        `${dead.map(([o, s]) => `${o}/* (${s.fail} responses, all 5xx, none OK)`).join(', ')} never answered a ` +
+          `single request successfully, so it is down rather than buggy — findings against it describe the ` +
+          `environment, not the app. Start the dependency it proxies to, or drop it from network.watchOrigins if ` +
+          `it is not meant to be up. network.deadOriginMinFailures: 0 disables this.`,
+      );
+    }
+  }
 
   // Only when NO route offered anything. A legitimately click-free page (legal,
   // docs) among real routes stays a per-route finding — failing every run on one
