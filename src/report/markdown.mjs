@@ -1,4 +1,5 @@
 import { groupCount, trunc } from '../util.mjs';
+import { routeWasTested } from '../severity.mjs';
 
 const fmtLcp = (ms) => (ms ? `${(ms / 1000).toFixed(1)}s` : '-');
 
@@ -27,11 +28,24 @@ function sessionLine(state, statsList) {
   );
 }
 
-function pageCell(ps) {
+function pageCell(ps, verified) {
   if (ps.skipped) return `${ps.page} (SKIPPED)`;
   if (ps.unreached) return `${ps.page} (UNREACHED)`;
-  if (ps.redirectedTo) return `${ps.page} → ${ps.redirectedTo}`;
-  return ps.page;
+  // Routes after a mid-run crash used to render as a bare `| /x | 0 |`,
+  // indistinguishable from a route that completed. Gated on !verified so the
+  // marker cannot appear inside a report titled clean.
+  const mark = !verified && !routeWasTested(ps) ? ' (NOT EXERCISED)' : '';
+  return (ps.redirectedTo ? `${ps.page} → ${ps.redirectedTo}` : ps.page) + mark;
+}
+
+/** Any in-page walk hit the node budget — not just the clickable one. */
+const scanCut = (ps) => !!(ps.scanTruncated || (ps.clickable && ps.clickable.scanTruncated));
+
+/** '-' when the census never ran; a bold 0 is the finding, not a number. */
+function clickableCell(ps) {
+  const c = ps.clickable;
+  if (!c || c.atEnter == null) return '-';
+  return c.max === 0 ? '**0**' : String(c.max);
 }
 
 /**
@@ -56,7 +70,7 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     L.push('');
   }
   L.push(`- base: ${config.baseUrl}`);
-  L.push(`- seed: **${config.seed}** (repro: \`webapp-qa --seed ${config.seed}\`)`);
+  L.push(`- seed: **${config.seed}** (repro: \`mischief --seed ${config.seed}\`)`);
   L.push(`- pages: ${routes.map((r) => r.path).join(', ')}`);
   L.push(`- session: ${sessionLine(state, statsList)}`);
   L.push(`- steps/page: ${config.steps}`);
@@ -65,37 +79,68 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     `- totals: ${tot.steps} steps · ${tot.jsExc} JS exceptions · ${tot.n5} 5xx · ${tot.n4} 4xx · ` +
       `${tot.cerr} console errors · ${tot.text} text-pattern hits · ${state.gates.length} gates · ${state.skippedDanger.length} danger-skips`,
   );
-  if (tot.unreached || tot.redirected || tot.skipped) {
-    L.push(`- coverage: ${tot.unreached} unreached · ${tot.redirected} redirected · ${tot.skipped} skipped`);
+  if (tot.unreached || tot.redirected || tot.skipped || tot.noClickable) {
+    const exercised = statsList.filter(routeWasTested).length;
+    L.push(
+      `- coverage: ${exercised}/${statsList.length} routes exercised · ${tot.unreached} unreached · ` +
+        `${tot.redirected} redirected · ${tot.skipped} skipped` +
+        (tot.noClickable ? ` · ${tot.noClickable} with nothing to click` : ''),
+    );
   }
+  // Positive evidence that shadow-root piercing ran, so a component app can tell
+  // "found nothing" from "never looked".
+  const openRoots = statsList.reduce((n, p) => n + ((p.clickable && p.clickable.shadow && p.clickable.shadow.openRoots) || 0), 0);
+  if (openRoots) L.push(`- dom: ${openRoots} open shadow root(s) traversed`);
+  // Which origins were judged, so "no 5xx" is distinguishable from "your API was
+  // never looked at". Printed only when it is not just baseOrigin, i.e. only when
+  // it is not already implied by `- base:` two lines up.
+  const watched = config.watchedOrigins || [];
+  if (watched.length > 1) L.push(`- network: responses classified from ${watched.join(', ')}`);
   L.push('');
 
-  // 2 — summary table
+  // 2 — summary table. The `clickable` column is APPENDED: the golden-spine test
+  // matches the header and separator rows as substrings, so inserting a column
+  // anywhere else silently breaks the report contract.
   L.push('## Summary');
   L.push('');
-  L.push('| page | steps | JS exc | net 4xx/5xx | console err | CLS | LCP | a11y flags | broken imgs | overflow? |');
-  L.push('|---|---|---|---|---|---|---|---|---|---|');
+  L.push('| page | steps | JS exc | net 4xx/5xx | console err | CLS | LCP | a11y flags | broken imgs | overflow? | clickable |');
+  L.push('|---|---|---|---|---|---|---|---|---|---|---|');
   for (const ps of statsList) {
     const a11yN = ps.a11y ? ps.a11y.imgsNoAlt.count + ps.a11y.unlabeledButtons.count + ps.a11y.unlabeledInputs.count : '-';
     const over = ps.overflow.length ? `yes (${[...new Set(ps.overflow.map((o) => o.viewport))].join(', ')})` : 'no';
     L.push(
-      `| ${pageCell(ps)} | ${ps.steps} | ${ps.jsExceptions.length} | ${ps.net4xx.length}/${ps.net5xx.length} | ` +
+      `| ${pageCell(ps, verified)} | ${ps.steps} | ${ps.jsExceptions.length} | ${ps.net4xx.length}/${ps.net5xx.length} | ` +
         `${ps.consoleErrors.length + ps.consoleDropped.error} | ${ps.perf.cls.toFixed(3)} | ${fmtLcp(ps.perf.lcp)} | ` +
-        `${a11yN} | ${ps.brokenImages.size} | ${over} |`,
+        `${a11yN} | ${ps.brokenImages.size} | ${over} | ${clickableCell(ps)} |`,
     );
   }
   L.push('');
 
-  // 2b — coverage, only when something was not tested
-  const notTested = statsList.filter((p) => p.unreached || p.skipped || p.redirectedTo);
-  if (notTested.length) {
+  // 2b — coverage, only when something was not tested. Resolver-dropped routes
+  // land here too: they appear in no statsList row, so without this the run
+  // silently reports on nine routes when you asked for ten.
+  const noClick = (p) => p.steps > 0 && p.clickable && p.clickable.atEnter === 0 && p.clickable.max === 0;
+  const notTested = statsList.filter((p) => p.unreached || p.skipped || p.redirectedTo || noClick(p));
+  const dropped = state.droppedRoutes || [];
+  if (notTested.length || dropped.length) {
     L.push('## Coverage gaps');
     L.push('');
     for (const ps of notTested) {
       if (ps.unreached) L.push(`- **NOT TESTED** ${ps.page} — ${ps.unreached}`);
       else if (ps.skipped) L.push(`- skipped ${ps.page} — ${ps.skipped}`);
-      else L.push(`- ${ps.page} redirected to ${ps.redirectedTo} — the steps below hammered the destination, not ${ps.page}`);
+      else if (ps.redirectedTo)
+        L.push(`- ${ps.page} redirected to ${ps.redirectedTo} — the steps below hammered the destination, not ${ps.page}`);
+      // Not `else`: a route can be both redirected and click-free, and the two
+      // gaps have different remedies.
+      if (noClick(ps) && !ps.unreached && !ps.skipped) {
+        const s = ps.clickable.shadowAtEnter || ps.clickable.shadow;
+        L.push(
+          `- **NOTHING TO CLICK** ${ps.page} — 0 candidates matched ${ps.clickable.selector}` +
+            (s ? `; ${s.openRoots} open shadow root(s), ${s.closedSuspects} with no open root` : ''),
+        );
+      }
     }
+    for (const d of dropped) L.push(`- **NOT TESTED** ${d.path} — dropped before the run: ${d.why}`);
     L.push('');
   }
 
@@ -176,10 +221,28 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     }
     if (ps.gotoNote) L.push(`- ${ps.page}: ${ps.gotoNote}`);
     if (ps.redirectedTo) L.push(`- ${ps.page} redirected to ${ps.redirectedTo}`);
+    // All statements about how much of the run's own evidence is missing. Rendered
+    // here because summarize() files them as 'medium', and a MEDIUM section that
+    // says "None." while findings[] holds a medium is its own small lie.
+    if (scanCut(ps))
+      L.push(`- ${ps.page}: the DOM scan stopped at guardrails.maxScanNodes (${config.guardrails.maxScanNodes}) — deeper subtrees were never offered a click`);
+    if (ps.textHitsCapped)
+      L.push(`- ${ps.page}: the text scan stopped at probes.maxTextHits (${config.probes.maxTextHits}) — there may be more leaked markup than is listed`);
+    if (ps.clickable && ps.clickable.probeFailed)
+      L.push(`- ${ps.page}: the clickable census threw in-page — candidate coverage here is UNKNOWN`);
   }
   if (
     tot.cerr === 0 && tot.slow === 0 && tot.stepFail === 0 && tot.redirected === 0 &&
-    !statsList.some((p) => p.perf.cls > config.thresholds.cls || p.perf.lcp > config.thresholds.lcpMs || p.gotoNote || (p.custom || []).length)
+    !statsList.some(
+      (p) =>
+        p.perf.cls > config.thresholds.cls ||
+        p.perf.lcp > config.thresholds.lcpMs ||
+        p.gotoNote ||
+        (p.custom || []).length ||
+        p.textHitsCapped ||
+        scanCut(p) ||
+        (p.clickable && p.clickable.probeFailed),
+    )
   ) {
     L.push('None.');
   }
@@ -188,6 +251,12 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
   L.push('### LOW');
   L.push('');
   for (const ps of statsList) {
+    if (ps.clickable && ps.clickable.capped) {
+      L.push(
+        `- ${ps.page}: at least guardrails.maxCandidates (${config.guardrails.maxCandidates}) controls matched; ` +
+          `only the first ${config.guardrails.maxCandidates} in DOM order could ever be clicked`,
+      );
+    }
     if (!ps.a11y) continue;
     const a = ps.a11y;
     if (a.imgsNoAlt.count + a.unlabeledButtons.count + a.unlabeledInputs.count === 0) continue;
@@ -202,7 +271,7 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     L.push(`- console warnings: ${tot.cwarn} total; top distinct:`);
     for (const g of groupCount(allWarns, (t) => trunc(t, 140)).slice(0, 5)) L.push(`    - ×${g.count} ${g.key}`);
   }
-  if (tot.a11y === 0 && tot.cwarn === 0) L.push('None.');
+  if (tot.a11y === 0 && tot.cwarn === 0 && !statsList.some((p) => p.clickable && p.clickable.capped)) L.push('None.');
   L.push('');
 
   // 4 — gates
@@ -223,6 +292,17 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     L.push(`- "${g.key}" ×${g.count}`);
   }
   L.push('');
+
+  // 6 — config warnings. Trailing, because headings are only ever ADDED. The
+  // `|| []` is required: report fixtures build `state` by hand and omit this.
+  const warnings = state.configWarnings || [];
+  if (warnings.length) {
+    L.push('## Notes');
+    L.push('');
+    for (const w of warnings) L.push(`- ${w}`);
+    L.push('');
+  }
+
   L.push(`_Full raw data: ${runId}/log.json · screenshots: ${runId}/shots/_`);
   L.push('');
 

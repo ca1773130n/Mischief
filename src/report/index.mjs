@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { ConfigError } from '../util.mjs';
 import { buildMarkdown } from './markdown.mjs';
 
 /**
@@ -15,6 +16,7 @@ export function defineReporter(spec) {
   return spec;
 }
 
+
 export const markdownReporter = defineReporter({
   name: 'markdown',
   write(result, { outDir, runId }) {
@@ -26,7 +28,7 @@ export const markdownReporter = defineReporter({
 
 /**
  * The raw log is what makes a finding reproducible: config (including the seed),
- * the full action log, and every collected stat. `webapp-qa replay <runId>`
+ * the full action log, and every collected stat. `mischief replay <runId>`
  * reads exactly this file.
  */
 export const jsonReporter = defineReporter({
@@ -43,6 +45,7 @@ export const jsonReporter = defineReporter({
           durationMs,
           verified: state.verified !== false,
           unverifiedReason: state.unverifiedReason || null,
+          configWarnings: state.configWarnings || [],
           authed: !!state.authed,
           verification: state.verification || null,
           summary: { ...summary.tot, critCount: summary.critCount, highCount: summary.highCount },
@@ -75,7 +78,23 @@ function serializableConfig(config, routes) {
     mutators: config.mutators.enabled,
     browser: { mode: config.browser.mode, cdpUrl: config.browser.cdpUrl, headless: config.browser.headless },
     auth: { strategy: config.auth.strategy, key: config.auth.key, from: config.auth.from },
-    guardrails: { dangerPattern: String(config.guardrails.dangerPattern), ignoreAttribute: config.guardrails.ignoreAttribute },
+    // The candidate list is a function of these, so a log that omitted them could
+    // not explain its own picks — nor its exit code, which requireClickable and
+    // requireEffectiveSteps both move.
+    guardrails: {
+      dangerPattern: String(config.guardrails.dangerPattern),
+      ignoreAttribute: config.guardrails.ignoreAttribute,
+      clickableSelector: config.guardrails.clickableSelector,
+      maxScanNodes: config.guardrails.maxScanNodes,
+      maxCandidates: config.guardrails.maxCandidates,
+      requireClickable: config.guardrails.requireClickable,
+      requireEffectiveSteps: config.guardrails.requireEffectiveSteps,
+      forceOpenShadowRoots: config.guardrails.forceOpenShadowRoots,
+    },
+    // gotoWaitUntil decides whether a route was even loaded before it was probed.
+    timing: { gotoWaitUntil: config.timing.gotoWaitUntil, settleMs: config.timing.settleMs },
+    // "no 5xx" means nothing without knowing which origins were judged.
+    watchedOrigins: config.watchedOrigins || [],
     thresholds: config.thresholds,
     allowProd: config.allowProd,
     allowAnonymous: config.allowAnonymous,
@@ -88,7 +107,7 @@ export function resolveReporters(config) {
   const out = [];
   for (const name of config.report.formats || []) {
     const r = builtinReporters[name];
-    if (!r) throw new Error(`Unknown report format "${name}". Valid: ${Object.keys(builtinReporters).join(', ')}`);
+    if (!r) throw new ConfigError(`Unknown report format "${name}". Valid: ${Object.keys(builtinReporters).join(', ')}`);
     out.push(r);
   }
   for (const r of config.report.reporters || []) out.push(r);

@@ -10,10 +10,15 @@ import { stripQuery, trunc } from './util.mjs';
  * section in noise on any app with plans or permissions. Everything else 4xx is
  * a high finding.
  *
- * Override via `network.classifyResponse` if your app disagrees.
+ * `watched` is false for a response from an origin outside
+ * [baseOrigin, ...network.watchOrigins] — third-party analytics and CDN noise is
+ * not this app's bug, so the default ignores it. Add your API's origin to
+ * network.watchOrigins to have it judged; override this whole function via
+ * `network.classifyResponse` if your app disagrees.
  */
-export function defaultClassifyResponse({ status, url }, config) {
+export function defaultClassifyResponse({ status, url, watched = true }, config) {
   if (status < 400) return 'ignore';
+  if (!watched) return 'ignore';
   if (status >= 500) return 'critical';
   if (status === 402 || status === 403) return 'gate';
   if (status === 401 && config.network.loginAdjacent.test(url)) return 'gate';
@@ -33,6 +38,7 @@ export function wireCollectors(page, state, baseOrigin, config) {
   const ignore = config.network.consoleIgnore || [];
   const cap = config.report.consoleCap;
   const classify = config.network.classifyResponse || ((rec) => defaultClassifyResponse(rec, config));
+  const watched = config.watchedOrigins || [baseOrigin];
 
   page.on('console', (msg) => {
     const type = msg.type();
@@ -73,15 +79,23 @@ export function wireCollectors(page, state, baseOrigin, config) {
     reqStart.delete(r);
     if (!t0) return;
     const ms = Date.now() - t0;
-    if (ms > config.network.slowRequestMs && state.ps.slowRequests.length < 100) {
-      // `throttled` matters: a 12s request during a deliberate Slow-3G window is
-      // the harness's own doing, not a finding.
-      state.ps.slowRequests.push({ url: trunc(stripQuery(r.url()), 200), ms, throttled: state.slowStepsRemaining > 0 });
+    if (ms <= config.network.slowRequestMs) return;
+    // Cap, then COUNT the drops, exactly like consoleCap above. These caps used to
+    // discard silently, so a storm past the cap read as "only 100 slow requests".
+    if (state.ps.slowRequests.length >= config.report.slowRequestCap) {
+      state.ps.slowRequestsDropped++;
+      return;
     }
+    // `throttled` matters: a 12s request during a deliberate Slow-3G window is
+    // the harness's own doing, not a finding.
+    state.ps.slowRequests.push({ url: trunc(stripQuery(r.url()), 200), ms, throttled: state.slowStepsRemaining > 0 });
   });
   page.on('requestfailed', (r) => {
     reqStart.delete(r);
-    if (state.ps.requestFailures.length >= 300) return;
+    if (state.ps.requestFailures.length >= config.report.requestFailureCap) {
+      state.ps.requestFailuresDropped++;
+      return;
+    }
     state.ps.requestFailures.push({
       url: trunc(stripQuery(r.url()), 200),
       failure: (r.failure() && r.failure().errorText) || 'unknown',
@@ -92,12 +106,21 @@ export function wireCollectors(page, state, baseOrigin, config) {
   page.on('response', (res) => {
     try {
       const url = res.url();
-      // Third-party analytics and CDN noise is not this app's bug.
-      if (!url.startsWith(baseOrigin)) return;
       const status = res.status();
       if (status < 400) return;
-      const rec = { method: res.request().method(), url: trunc(stripQuery(url), 200), status, action: lastActionDesc(state) };
-      const verdict = classify({ status, url, method: rec.method });
+      // Everything reaches classify(), including cross-origin. Returning early on
+      // `!url.startsWith(baseOrigin)` made network.classifyResponse — documented as
+      // the override — structurally unable to see the API of any app whose API is
+      // not on the app's own origin, which is the common dev layout. Such an app
+      // reported zero 4xx/5xx however hard its API was failing.
+      const rec = {
+        method: res.request().method(),
+        url: trunc(stripQuery(url), 200),
+        status,
+        action: lastActionDesc(state),
+        watched: watched.some((o) => url.startsWith(o)),
+      };
+      const verdict = classify({ status, url, method: rec.method, watched: rec.watched });
       if (verdict === 'critical') state.ps.net5xx.push(rec);
       else if (verdict === 'gate') state.gates.push({ ...rec, page: state.currentRoutePath });
       else if (verdict === 'high') state.ps.net4xx.push(rec);

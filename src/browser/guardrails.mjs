@@ -1,4 +1,5 @@
 import { gatherCandidatesInPage } from '../probes/inpage.mjs';
+import { clickableArg } from '../probes/index.mjs';
 import { pickFrom } from '../rng.mjs';
 import { sleep } from '../util.mjs';
 
@@ -9,23 +10,44 @@ import { sleep } from '../util.mjs';
  * The polling loop is not paranoia: right after a reload or route change the app
  * may not have rendered yet, and an empty candidate list at that instant is
  * timing noise that makes two runs of the same seed diverge. Two seconds of
- * patience buys reproducibility.
+ * patience buys reproducibility. collectClickable polls identically — a census
+ * less patient than the clicks it describes would report a slow app as click-free.
  */
 export async function chooseClickPoint(ctx, mutatorName) {
-  const g = ctx.config.guardrails;
-  const arg = {
-    dangerSource: g.dangerPattern.source,
-    dangerFlags: g.dangerPattern.flags || 'i',
-    ignoreAttribute: g.ignoreAttribute,
-    maxCandidates: g.maxCandidates,
-  };
-  let cands = null;
-  for (let attempt = 0; attempt < 8; attempt++) {
-    cands = await ctx.page.evaluate(gatherCandidatesInPage, arg).catch(() => null);
-    if (cands && cands.length) break;
-    await sleep(250);
+  const arg = clickableArg(ctx.config);
+  const t = ctx.config.timing;
+  let res = null;
+  let threw = false;
+  for (let attempt = 0; attempt < Math.max(1, t.settlePollAttempts); attempt++) {
+    threw = false;
+    res = await ctx.page.evaluate(gatherCandidatesInPage, arg).catch(() => {
+      threw = true;
+      return null;
+    });
+    if (res && res.candidates.length) break;
+    await sleep(t.settlePollMs);
   }
-  if (!cands || !cands.length) return null;
+  // Pure counters — no ctx.rng() is drawn here. One extra draw before pickFrom
+  // would shift every pick of every existing seed.
+  const ps = ctx.state && ctx.state.ps;
+  if (ps && ps.clickable) {
+    ps.clickable.attempts++;
+    if (res) {
+      ps.clickable.max = Math.max(ps.clickable.max, res.candidates.length);
+      ps.clickable.selector = ps.clickable.selector || res.selector;
+      if (res.truncated) ps.clickable.scanTruncated = true;
+      if (res.capped) ps.clickable.capped = true;
+      if (res.shadow) ps.clickable.shadow = res.shadow;
+    }
+    // An in-page throw used to be recorded only as `empty++`, making a broken
+    // probe indistinguishable from a genuinely empty page — the silent degradation
+    // the census exists to end. `empty` still counts it: a step that found nothing
+    // to click really did find nothing.
+    if (threw) ps.clickable.probeFailed = true;
+    if (!res || !res.candidates.length) ps.clickable.empty++;
+  }
+  if (!res || !res.candidates.length) return null;
+  const cands = res.candidates;
   let pick = pickFrom(ctx.rng, cands);
   if (pick.danger) {
     // Logged as refused, then re-drawn from the safe pool — so the report can
@@ -39,12 +61,19 @@ export async function chooseClickPoint(ctx, mutatorName) {
   return pick;
 }
 
-/** If a mutator walked us off-origin, come back to the route under test. */
+/**
+ * If a mutator walked us off-origin, come back to the route under test.
+ * Uses timing.gotoWaitUntil like the route navigation itself: a hardcoded
+ * 'domcontentloaded' here meant the key was honoured on the first goto only.
+ */
 export async function ensureOnOrigin(ctx) {
   if (!ctx.config.guardrails.stayOnOrigin) return;
   if (ctx.page.url().startsWith(ctx.baseOrigin)) return;
   await ctx.page
-    .goto(ctx.baseOrigin + ctx.state.currentRoutePath, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    .goto(ctx.baseOrigin + ctx.state.currentRoutePath, {
+      waitUntil: ctx.config.timing.gotoWaitUntil,
+      timeout: ctx.config.timing.gotoTimeoutMs,
+    })
     .catch(() => {});
 }
 
@@ -81,12 +110,11 @@ export function wireGuardrails(page, state, baseOrigin, config) {
     // from it on its own, and fighting it here causes a navigation war.
     if (state.closing || recovering || url === 'about:blank' || url.startsWith(baseOrigin)) return;
     recovering = true;
+    const t = config.timing;
     try {
-      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+      await page.goBack({ waitUntil: t.gotoWaitUntil, timeout: t.historyTimeoutMs }).catch(() => {});
       if (!page.url().startsWith(baseOrigin)) {
-        await page
-          .goto(baseOrigin + state.currentRoutePath, { waitUntil: 'domcontentloaded', timeout: 15000 })
-          .catch(() => {});
+        await page.goto(baseOrigin + state.currentRoutePath, { waitUntil: t.gotoWaitUntil, timeout: t.gotoTimeoutMs }).catch(() => {});
       }
     } finally {
       recovering = false;

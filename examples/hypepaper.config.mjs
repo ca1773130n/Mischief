@@ -4,14 +4,14 @@
 // inventory of what "app-specific" means in practice: everything below is a
 // coupling point that used to be a hardcoded constant in the harness.
 //
-// Drop this in as `qa/webapp-qa.config.mjs` and reduce qa/package.json to
-//   { "dependencies": { "webapp-qa-kit": "^0.1.0" },
-//     "scripts": { "monkey": "webapp-qa" } }
+// Drop this in as `qa/mischief.config.mjs` and reduce qa/package.json to
+//   { "dependencies": { "mischief": "^0.1.0" },
+//     "scripts": { "monkey": "mischief" } }
 //
 // NO SECRETS LIVE HERE. `auth.from` is a path to a gitignored file you create
 // yourself; the token never enters this config or the report.
 
-import { defineConfig, presets } from 'webapp-qa-kit';
+import { defineConfig, presets } from 'mischief';
 
 // The dev frontend and the API are separate origins. The old harness derived the
 // API base with base.replace('://', '://api.'), which turns the dev origin
@@ -24,7 +24,7 @@ export default defineConfig({
 
   // Fail-closed allowlist, replacing the old /hypepaper\.app/ denylist. The dev
   // host MUST be listed or every local run refuses to start;
-  // `webapp-qa --base https://hypepaper.app --allow-prod` still works.
+  // `mischief --base https://hypepaper.app --allow-prod` still works.
   allowedHosts: ['burningxoul.mooo.com', 'localhost', '127.0.0.1'],
 
   browser: {
@@ -111,6 +111,10 @@ export default defineConfig({
   network: {
     consoleIgnore: [...presets.consoleIgnore.vueI18n, ...presets.consoleIgnore.vue],
     slowRequestMs: 10000,
+    // The API is on another port from the app. Without this line every response
+    // from it is third-party noise, so a 500ing backend produces zero findings and
+    // the classifyResponse below never sees the requests it exists to judge.
+    watchOrigins: [new URL(API_BASE).origin],
     // Plan tiers FREE < PRO < ULTRA < TEAM < ADMIN mean 402/403 are the product
     // working, not breaking. This matches the package default; it is spelled out
     // because it is a business rule, and the day the plan model changes this is

@@ -11,6 +11,45 @@ test('defineConfig rejects a typo in a top-level key', () => {
   assert.doesNotThrow(() => defineConfig({ baseUrl: 'http://localhost:3000' }));
 });
 
+test('defineConfig rejects a typo in a NESTED key — every safety switch lives one level down', () => {
+  // A one-level check meant the documented remedy for a false exit 3 could be
+  // misspelled into a no-op: the report says "set guardrails.forceOpenShadowRoots:
+  // true", and `forceOpenShadowRoot` produced a byte-identical report and no error.
+  const bad = [
+    { guardrails: { forceOpenShadowRoot: true } },
+    { auth: { detectLoginScreens: false } },
+    { guardrails: { requireClickabl: false } },
+    { probes: { textSkipSelectr: '.x' } },
+    { timing: { gotoWaitUntill: 'load' } },
+    { report: { outdir: './r' } },
+  ];
+  for (const cfg of bad) {
+    assert.throws(() => defineConfig({ baseUrl: 'http://localhost:3000', ...cfg }), ConfigError, JSON.stringify(cfg));
+  }
+  // The error has to name the key that was rejected AND what was valid there.
+  try {
+    defineConfig({ guardrails: { forceOpenShadowRoot: true } });
+    assert.fail('should have thrown');
+  } catch (e) {
+    assert.match(e.message, /guardrails\.forceOpenShadowRoot/);
+    assert.match(e.message, /forceOpenShadowRoots/);
+  }
+});
+
+test('defineConfig still accepts every legitimately free-form nested shape', () => {
+  // Stopping at two levels is deliberate: level 3 is where user-chosen names live.
+  assert.doesNotThrow(() =>
+    defineConfig({
+      baseUrl: 'http://localhost:3000',
+      mutators: { weights: { myOwnMutator: 5, randomClick: 1 }, options: { offlineMs: 100 } },
+      viewports: { mobile: { width: 320, height: 480, deviceScaleFactor: 1, mobile: true } },
+      network: { slow3g: { offline: false, latency: 900, downloadThroughput: 1, uploadThroughput: 1 } },
+      input: { invalidValuesByType: { number: ['1e400'] } },
+      guardrails: { forceOpenShadowRoots: true, requireEffectiveSteps: false },
+    }),
+  );
+});
+
 test('allowedHosts is fail-closed: an unlisted host is refused', () => {
   assert.throws(() => resolveConfig({ baseUrl: 'https://app.example.com' }), /REFUSED/);
 });
@@ -52,8 +91,75 @@ test('auth misconfiguration is caught before a browser opens', () => {
   );
 });
 
+test('guardrails.maxScanNodes must be usable, because a bad value truncates every scan', () => {
+  const base = { baseUrl: 'http://localhost:3000' };
+  for (const bad of [0, -1, NaN, 'abc', null]) {
+    assert.throws(() => resolveConfig({ ...base, guardrails: { maxScanNodes: bad } }), /maxScanNodes must be a number/);
+  }
+  assert.equal(resolveConfig(base).guardrails.maxScanNodes, DEFAULT_CONFIG.guardrails.maxScanNodes);
+});
+
+test('a user-supplied clickableSelector survives the merge intact', () => {
+  const cfg = resolveConfig({ baseUrl: 'http://localhost:3000', guardrails: { clickableSelector: 'button, my-btn' } });
+  assert.equal(cfg.guardrails.clickableSelector, 'button, my-btn');
+  assert.equal(cfg.guardrails.ignoreAttribute, 'data-qa-ignore'); // sibling default kept
+});
+
+test('the goto default is not networkidle, which no app with an open socket reaches', () => {
+  // HMR sockets, SSE, realtime clients and analytics heartbeats all made every
+  // route burn the full gotoTimeoutMs and record a 'goto' finding.
+  assert.equal(resolveConfig({ baseUrl: 'http://localhost:3000' }).timing.gotoWaitUntil, 'domcontentloaded');
+});
+
+test('gotoWaitUntil is validated like its enum neighbours', () => {
+  // Unvalidated, a one-character typo made EVERY page.goto reject, the whole run
+  // happened on about:blank, and the report diagnosed it by naming a different key.
+  const base = { baseUrl: 'http://localhost:3000' };
+  for (const bad of ['domcontentLoaded', 'idle', '', null]) {
+    assert.throws(() => resolveConfig({ ...base, timing: { gotoWaitUntil: bad } }), /gotoWaitUntil must be one of/);
+  }
+  for (const good of ['load', 'domcontentloaded', 'networkidle', 'commit']) {
+    assert.equal(resolveConfig({ ...base, timing: { gotoWaitUntil: good } }).timing.gotoWaitUntil, good);
+  }
+});
+
+test('maxCandidates gets the validation its sibling got, for the same reason', () => {
+  // The walk aborts on `out.length >= maxCandidates`, and `0 >= null` is true, so a
+  // bad value returned an empty candidate list and reported it as "nothing to click".
+  const base = { baseUrl: 'http://localhost:3000' };
+  for (const bad of [0, -1, null, 'many']) {
+    assert.throws(() => resolveConfig({ ...base, guardrails: { maxCandidates: bad } }), /maxCandidates must be a number/);
+  }
+});
+
+test('the danger guardrail is not English-only by default', () => {
+  // presets.danger.en was the default, so a Korean, Japanese or Chinese app got
+  // ZERO destructive-click protection out of the box and the only hint was a
+  // Recipes section in the README.
+  const re = resolveConfig({ baseUrl: 'http://localhost:3000' }).guardrails.dangerPattern;
+  for (const label of ['Delete account', 'Log out', '삭제', '계정 삭제', '로그아웃', '削除', '退会', '删除', '登出']) {
+    assert.ok(re.test(label), `the default guardrail must refuse "${label}"`);
+  }
+  assert.ok(!re.test('Save changes'), 'and must not refuse everything');
+  assert.ok(!re.test('저장'), 'nor everything Korean');
+});
+
+test('requiresAuth without waitFor WARNS — it must never refuse to run', () => {
+  const cfg = resolveConfig({ baseUrl: 'http://localhost:3000', routes: [{ path: '/x', requiresAuth: true }] });
+  assert.equal(cfg.warnings.length, 1);
+  assert.match(cfg.warnings[0], /\/x/);
+  assert.match(cfg.warnings[0], /waitFor/);
+});
+
+test('a gated route with waitFor warns about nothing, and warnings always exists', () => {
+  // Reporters read config.warnings unconditionally, so the field must be an array
+  // even on a default config.
+  assert.equal(resolveConfig({ baseUrl: 'http://localhost:3000', routes: [{ path: '/x', requiresAuth: true, waitFor: '#x' }] }).warnings.length, 0);
+  assert.ok(Array.isArray(resolveConfig({ baseUrl: 'http://localhost:3000' }).warnings));
+});
+
 test('routes normalize from strings and objects alike', () => {
-  assert.deepEqual(normalizeRoute('pricing').path, '/pricing');
+  assert.deepEqual(normalizeRoute('one').path, '/one');
   const r = normalizeRoute({ path: '/a', requiresAuth: true, waitFor: '#x' });
   assert.equal(r.requiresAuth, true);
   assert.equal(r.waitFor, '#x');
@@ -64,7 +170,7 @@ test('a resolver returning nothing drops its route loudly, not silently', async 
   const cfg = resolveConfig({ baseUrl: 'http://localhost:3000' });
   const dropped = [];
   const routes = await resolveRoutes(
-    ['/', { path: '/items/:id', resolve: async () => null }],
+    ['/', { path: '/things/:id', resolve: async () => null }],
     cfg,
     (r, why) => dropped.push([r.path, why]),
   );
@@ -110,6 +216,38 @@ test('default response classification: 5xx critical, 402/403 gate, 401 gate only
   assert.equal(c(402), 'gate');
   assert.equal(c(403), 'gate');
   assert.equal(c(401, 'http://localhost:3000/api/session'), 'gate');
-  assert.equal(c(401, 'http://localhost:3000/api/papers'), 'high');
+  assert.equal(c(401, 'http://localhost:3000/api/things'), 'high');
   assert.equal(c(404), 'high');
+});
+
+test('loginAdjacent covers localized and token-named auth endpoints', () => {
+  // English-only, every 401 from a localized auth endpoint was filed as HIGH and
+  // drove exit code 1 on a perfectly normal gated request.
+  const cfg = resolveConfig({ baseUrl: 'http://localhost:3000' });
+  const gated = (url) => defaultClassifyResponse({ status: 401, url }, cfg);
+  for (const url of ['/api/login', '/ko/로그인', '/anmelden', '/connexion', '/api/v1/token', '/auth/refresh']) {
+    assert.equal(gated(url), 'gate', `401 from ${url} is a gate, not a defect`);
+  }
+  assert.equal(gated('/api/things/7'), 'high');
+});
+
+test('a cross-origin API is classified when watched, and ignored when not', () => {
+  // The split frontend/API layout — the most common dev layout, and the layout of
+  // this package's own example config — used to yield ZERO 4xx/5xx findings, because
+  // every response off baseOrigin was dropped BEFORE classification and no report
+  // line said the API had never been looked at.
+  const plain = resolveConfig({ baseUrl: 'http://localhost:3000' });
+  assert.deepEqual(plain.watchedOrigins, ['http://localhost:3000']);
+  const apiUrl = 'http://localhost:8000/api/things';
+  assert.equal(defaultClassifyResponse({ status: 500, url: apiUrl, watched: false }, plain), 'ignore');
+
+  const watching = resolveConfig({
+    baseUrl: 'http://localhost:3000',
+    network: { watchOrigins: ['http://localhost:8000/ignored/path'] },
+  });
+  assert.deepEqual(watching.watchedOrigins, ['http://localhost:3000', 'http://localhost:8000']);
+  assert.equal(defaultClassifyResponse({ status: 500, url: apiUrl, watched: true }, watching), 'critical');
+  // A CDN 500 still is not this app's bug.
+  assert.equal(defaultClassifyResponse({ status: 500, url: 'https://cdn.example/x.js', watched: false }, watching), 'ignore');
+  assert.throws(() => resolveConfig({ baseUrl: 'http://localhost:3000', network: { watchOrigins: ['not a url'] } }), /not a URL/);
 });

@@ -1,5 +1,5 @@
 {
-  "name": "webapp-qa-kit",
+  "name": "mischief",
   "version": "0.1.0",
   "description": "Seeded, guard-railed monkey testing for web apps in a real browser. Every finding replays from its seed; a run that could not reach the page it asked for fails instead of passing.",
   "keywords": [
@@ -13,21 +13,32 @@
     "accessibility"
   ],
   "license": "MIT",
+  "author": "ca1773130n",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ca1773130n/Mischief.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ca1773130n/Mischief/issues"
+  },
+  "homepage": "https://github.com/ca1773130n/Mischief#readme",
   "type": "module",
   "engines": {
     "node": ">=18"
   },
   "bin": {
-    "webapp-qa": "./bin/webapp-qa.mjs"
+    "mischief": "./bin/mischief.mjs"
   },
   "exports": {
     ".": "./src/index.mjs",
-    "./presets": "./src/presets.mjs"
+    "./presets": "./src/presets.mjs",
+    "./package.json": "./package.json"
   },
   "files": [
     "bin",
     "src",
     "templates",
+    "examples",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

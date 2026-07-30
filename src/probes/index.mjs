@@ -1,5 +1,5 @@
-import { a11yPassInPage, brokenImagesInPage, perfInPage, textPatternsInPage } from './inpage.mjs';
-import { reWire } from '../util.mjs';
+import { a11yPassInPage, brokenImagesInPage, gatherCandidatesInPage, perfInPage, textPatternsInPage } from './inpage.mjs';
+import { reWire, sleep } from '../util.mjs';
 
 /**
  * Register a custom probe.
@@ -42,28 +42,119 @@ export async function collectPerf(page, ps) {
   ps.perf.load = ps.perf.load || p.load;
 }
 
-export async function collectBrokenImages(page, ps) {
-  const list = await safeEval(page, brokenImagesInPage, undefined, []);
-  for (const src of list) ps.brokenImages.add(src);
+export async function collectBrokenImages(page, ps, config) {
+  const res = await safeEval(page, brokenImagesInPage, { maxScanNodes: config.guardrails.maxScanNodes }, null);
+  if (!res) return;
+  for (const src of res.images) ps.brokenImages.add(src);
+  if (res.truncated) ps.scanTruncated = true;
 }
 
-export async function collectA11y(page, ps) {
-  ps.a11y = await safeEval(page, a11yPassInPage, undefined, null);
+/**
+ * Run at BOTH phases, keeping whichever pass saw more.
+ *
+ * Enter-only was a silent undercount: the goto now resolves at
+ * domcontentloaded, so on a slow-hydrating app the enter pass can scan a
+ * skeleton. The exit pass looks at a page that has definitely rendered.
+ */
+export async function collectA11y(page, ps, config) {
+  const a = await safeEval(page, a11yPassInPage, { maxScanNodes: config.guardrails.maxScanNodes }, null);
+  if (!a) return;
+  if (a.truncated) ps.scanTruncated = true;
+  const total = (x) => (x ? x.imgsNoAlt.count + x.unlabeledButtons.count + x.unlabeledInputs.count : -1);
+  // Whole object, not per-counter maxima: the samples have to belong to the counts
+  // they are printed under.
+  if (total(a) > total(ps.a11y)) ps.a11y = a;
 }
 
+/**
+ * The single source of truth for the candidate-gathering argument.
+ *
+ * chooseClickPoint and this census MUST pass the same thing: a census that
+ * counted candidates the click mutators could not see would be worse than no
+ * census, because it would read as coverage.
+ */
+export function clickableArg(config) {
+  const g = config.guardrails;
+  return {
+    selector: g.clickableSelector,
+    dangerSource: g.dangerPattern.source,
+    dangerFlags: g.dangerPattern.flags || 'i',
+    ignoreAttribute: g.ignoreAttribute,
+    maxCandidates: g.maxCandidates,
+    maxScanNodes: g.maxScanNodes,
+  };
+}
+
+/**
+ * Count what this route offers a click, on entry.
+ *
+ * Per-route rather than per-click because a route whose `mutators` list excludes
+ * randomClick/rapidDoubleClick would otherwise produce no data at all — and
+ * "the report never said whether it found anything to click" is the defect.
+ *
+ * Polls with exactly the patience chooseClickPoint uses. It was a single shot,
+ * which was survivable while zero candidates were merely reported — but a
+ * zero-candidate run is now exit 3, so on a route with no click mutator this shot
+ * is the ONLY evidence, and one glance at a slow-hydrating app under the
+ * domcontentloaded default would fail a healthy run. See timing.settlePoll*.
+ */
+export async function collectClickable(page, ps, config) {
+  const arg = clickableArg(config);
+  let res = null;
+  for (let attempt = 0; attempt < Math.max(1, config.timing.settlePollAttempts); attempt++) {
+    res = await safeEval(page, gatherCandidatesInPage, arg, null);
+    if (res && res.candidates.length) break;
+    await sleep(config.timing.settlePollMs);
+  }
+  // safeEval swallows in-page throws, so a crash MUST NOT be recorded as zero:
+  // that would fabricate the exact false signal this probe exists to detect.
+  if (!res) {
+    ps.clickable.probeFailed = true;
+    return;
+  }
+  ps.clickable.atEnter = res.candidates.length;
+  ps.clickable.max = Math.max(ps.clickable.max, res.candidates.length);
+  ps.clickable.selector = res.selector;
+  ps.clickable.shadow = res.shadow;
+  // Kept separate from `shadow`, which every click attempt overwrites: the
+  // no-clickable message quotes this census, and mixing an enter-time atEnter with
+  // a last-step shadow count is evidence from two different moments.
+  ps.clickable.shadowAtEnter = res.shadow;
+  if (res.truncated) ps.clickable.scanTruncated = true;
+  if (res.truncated) ps.scanTruncated = true;
+  if (res.capped) ps.clickable.capped = true;
+}
+
+/**
+ * Run at BOTH phases, unioned — same reason as collectA11y. Hits are the
+ * highest-value probe class in the package and they default to severity 'high',
+ * so an enter-only scan of an unrendered skeleton is the most expensive kind of
+ * silent undercount.
+ */
 export async function collectTextPatterns(page, ps, config) {
   const patterns = config.probes.textPatterns || [];
   if (!patterns.length) return;
-  ps.textHits = await safeEval(
+  const res = await safeEval(
     page,
     textPatternsInPage,
     {
       patterns: patterns.map((p) => ({ name: p.name, severity: p.severity || 'high', ...reWire(p.re) })),
       skipSelector: config.probes.textSkipSelector || '',
-      maxHits: 25,
+      maxHits: config.probes.maxTextHits,
+      maxScanNodes: config.guardrails.maxScanNodes,
     },
-    [],
+    null,
   );
+  if (!res) return;
+  if (res.truncated) ps.scanTruncated = true;
+  if (res.capped) ps.textHitsCapped = true;
+  const seen = new Set((ps.textHits || []).map((h) => `${h.kind}|${h.where}|${h.text}`));
+  for (const h of res.hits) {
+    const k = `${h.kind}|${h.where}|${h.text}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    ps.textHits.push(h);
+  }
 }
 
 export async function collectCustom(page, ps, config, phase) {
@@ -75,13 +166,19 @@ export async function collectCustom(page, ps, config, phase) {
   }
 }
 
-/** Run the whole built-in probe set for one phase. */
+/**
+ * Run the whole built-in probe set for one phase.
+ *
+ * Only the clickable census is enter-only, because "what did this route offer on
+ * arrival" is its definition. Everything else accumulates across both phases: an
+ * enter-only scan happens settleMs after a goto that resolves at
+ * domcontentloaded, which on a hydrating SPA is a scan of the skeleton.
+ */
 export async function runProbes(page, ps, config, phase) {
   if (config.probes.perf) await collectPerf(page, ps);
-  if (config.probes.brokenImages) await collectBrokenImages(page, ps);
-  if (phase === 'enter') {
-    if (config.probes.a11y) await collectA11y(page, ps);
-    await collectTextPatterns(page, ps, config);
-  }
+  if (config.probes.brokenImages) await collectBrokenImages(page, ps, config);
+  if (phase === 'enter') await collectClickable(page, ps, config);
+  if (config.probes.a11y) await collectA11y(page, ps, config);
+  await collectTextPatterns(page, ps, config);
   await collectCustom(page, ps, config, phase);
 }

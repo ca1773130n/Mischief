@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { deriveStepRng, mulberry32, pickWeighted } from './rng.mjs';
-import { makeRunId, pathOf, slugOf, sleep, trunc } from './util.mjs';
+import { makeRunId, pathOf, samePath, sleep, trunc, uniqueSlugs } from './util.mjs';
 import { openBrowser, makeCleanup } from './browser/attach.mjs';
 import { wireGuardrails, restoreNetwork } from './browser/guardrails.mjs';
 import { wireCollectors } from './collect.mjs';
@@ -10,7 +10,7 @@ import { resolveMutators } from './mutators/index.mjs';
 import { runProbes } from './probes/index.mjs';
 import { initScriptInPage } from './probes/inpage.mjs';
 import { resolveRoutes, newRouteStats } from './routes.mjs';
-import { summarize, exitCodeFor, EXIT } from './severity.mjs';
+import { summarize, exitCodeFor, unverifiedReasons, EXIT } from './severity.mjs';
 import { resolveReporters } from './report/index.mjs';
 
 /**
@@ -27,17 +27,34 @@ export async function runMonkey(config, { onLog } = {}) {
   const outDir = config.report.outDir;
   const runDir = path.join(outDir, runId);
   const shotsDir = path.join(runDir, 'shots');
+
+  // Pre-flight resolution runs BEFORE the run directory exists and inside a try,
+  // so that a config typo neither breaks this function's "never throws, returns an
+  // exitCode" contract nor leaves an orphan reports/<runId>/shots behind. All three
+  // resolvers can throw: `steps: 0`, an all-dropped route resolver, `--mutators
+  // randomClik`, an unknown report format.
+  const dropped = [];
+  let routes, registry, mutatorEntries, reporters;
+  try {
+    routes = await resolveRoutes(config.routes, config, (r, why) => {
+      dropped.push({ path: r.path, why });
+      say(`mischief: dropping ${r.path} — ${why}`);
+    });
+    ({ registry, entries: mutatorEntries } = resolveMutators(config));
+    reporters = resolveReporters(config);
+  } catch (e) {
+    const why = `the run could not be set up: ${(e && e.message) || e}`;
+    say(`mischief: ABANDONED — ${why}`);
+    return preflightFailure({ runId, config, startDate, error: e, why });
+  }
+
   fs.mkdirSync(shotsDir, { recursive: true });
 
-  const dropped = [];
-  const routes = await resolveRoutes(config.routes, config, (r, why) => {
-    dropped.push({ path: r.path, why });
-    say(`webapp-qa: dropping ${r.path} — ${why}`);
-  });
-  const { registry, entries: mutatorEntries } = resolveMutators(config);
-  const reporters = resolveReporters(config);
-
   const statsList = routes.map(newRouteStats);
+  // Injective per-route screenshot names. slugOf alone collapsed two non-Latin
+  // paths onto one filename, so the second overwrote the first and both report
+  // rows pointed at the wrong page.
+  const routeSlugs = uniqueSlugs(routes.map((r) => r.path));
   const state = {
     currentRoutePath: routes[0].path,
     stepIndex: 0,
@@ -47,6 +64,7 @@ export async function runMonkey(config, { onLog } = {}) {
     mobileEmulated: false,
     closing: false,
     errShots: 0,
+    stepDidWork: false, // see log() and the no-op accounting in the step loop
     actionLog: [],
     skippedDanger: [],
     gates: [],
@@ -54,12 +72,28 @@ export async function runMonkey(config, { onLog } = {}) {
     verified: true,
     verification: null,
     unverifiedReason: null,
+    configWarnings: config.warnings || [],
     droppedRoutes: dropped,
     outDir,
     shotsDir,
   };
-  const log = (mutator, target, note) =>
-    state.actionLog.push({ page: state.currentRoutePath, step: state.stepIndex, mutator, target, note });
+  /**
+   * `opts.noop: true` means the mutator ran to completion having done nothing —
+   * "no candidate", "no editable input". Mutators report those as SUCCESS, so
+   * without this flag a route where all 40 steps found nothing counted as
+   * exercised. One non-noop log entry in a step is enough to make the step real.
+   */
+  const log = (mutator, target, note, opts) => {
+    if (!opts || !opts.noop) state.stepDidWork = true;
+    state.actionLog.push({
+      page: state.currentRoutePath,
+      step: state.stepIndex,
+      mutator,
+      target,
+      note,
+      ...(opts && opts.noop ? { noop: true } : {}),
+    });
+  };
 
   // Declared before the pre-flight check below, which calls abandon() -> finish()
   // and would otherwise hit `t0` in its temporal dead zone.
@@ -78,7 +112,7 @@ export async function runMonkey(config, { onLog } = {}) {
   let fatal = null;
 
   try {
-    say(`webapp-qa: ${config.browser.mode === 'attach' ? `attaching to ${config.browser.cdpUrl}` : 'launching browser'} …`);
+    say(`mischief: ${config.browser.mode === 'attach' ? `attaching to ${config.browser.cdpUrl}` : 'launching browser'} …`);
     ({ browser, context, mode } = await openBrowser(config));
 
     // Session goes in BEFORE the first navigation. addInitScript-based
@@ -86,13 +120,13 @@ export async function runMonkey(config, { onLog } = {}) {
     try {
       const applied = await applyAuth({ context, config });
       state.authed = applied.authed;
-      if (applied.authed) say(`webapp-qa: ${applied.note}`);
+      if (applied.authed) say(`mischief: ${applied.note}`);
     } catch (e) {
       if (e instanceof AuthError && !config.allowAnonymous) {
         await hardClose(browser, context, mode);
         return abandon(`auth could not be applied — ${e.message}`);
       }
-      say(`webapp-qa: WARNING — ${e.message}; continuing ANONYMOUS`);
+      say(`mischief: WARNING — ${e.message}; continuing ANONYMOUS`);
     }
 
     page = await context.newPage(); // a fresh tab — never hijack a tab the user is using
@@ -107,7 +141,10 @@ export async function runMonkey(config, { onLog } = {}) {
     process.on('SIGINT', () => onSignal(130));
     process.on('SIGTERM', () => onSignal(143));
 
-    await page.addInitScript(initScriptInPage, { blockWindowOpen: config.guardrails.blockWindowOpen });
+    await page.addInitScript(initScriptInPage, {
+      blockWindowOpen: config.guardrails.blockWindowOpen,
+      forceOpenShadowRoots: config.guardrails.forceOpenShadowRoots,
+    });
     wireGuardrails(page, state, config.baseOrigin, config);
     wireCollectors(page, state, config.baseOrigin, config);
 
@@ -126,22 +163,50 @@ export async function runMonkey(config, { onLog } = {}) {
       const skipReason = routeSkipReason(route, state, config);
       if (skipReason) {
         ps.skipped = skipReason;
-        say(`webapp-qa: route ${ri + 1}/${routes.length} ${route.path} — SKIPPED (${skipReason})`);
+        say(`mischief: route ${ri + 1}/${routes.length} ${route.path} — SKIPPED (${skipReason})`);
         continue;
       }
 
-      say(`webapp-qa: route ${ri + 1}/${routes.length} ${route.path}`);
+      say(`mischief: route ${ri + 1}/${routes.length} ${route.path}`);
       try {
         await page.goto(config.baseOrigin + route.path, {
           waitUntil: config.timing.gotoWaitUntil,
           timeout: config.timing.gotoTimeoutMs,
         });
       } catch (e) {
-        // A networkidle cap is routine on apps with SSE or an HMR socket — the
-        // page is usually perfectly usable. Record it, do not abort.
+        // A goto cap is routine — the page is usually perfectly usable. Record
+        // it, do not abort. (It used to be routine on EVERY route, because the
+        // default waitUntil was 'networkidle' and no app with an open socket ever
+        // reaches that; see timing.gotoWaitUntil.)
         ps.gotoNote = `goto: ${trunc(String((e && e.message) || e), 140)}`;
       }
       await sleep(config.timing.settleMs);
+
+      // (a0) Are we even ON the app? A goto TIMEOUT leaves a loaded, usable
+      // document — that is the routine case above. ERR_CONNECTION_REFUSED,
+      // ERR_NAME_NOT_RESOLVED and a bad gotoWaitUntil enum do not: the tab is
+      // still on about:blank. Without this check the monkey spent every step
+      // mutating about:blank, one mutator in four threw, `steps > stepFailures`
+      // called the route exercised, and a default-config run against a dead
+      // baseUrl reported "coverage: 2/2 routes exercised" and EXIT 0 — the
+      // single likeliest real-world false green, since an app that failed to boot
+      // is the common CI case. Routed through `unreached` so the machinery that
+      // already exists names it, renders it under Coverage gaps and returns 3.
+      if (!page.url().startsWith(config.baseOrigin)) {
+        ps.unreached =
+          `never navigated to ${route.path} — the browser is still on ${page.url()}, not on ${config.baseOrigin}` +
+          (ps.gotoNote ? ` (${ps.gotoNote})` : '');
+        say(`mischief:   NOT REACHED — ${ps.unreached}`);
+        ps.durationMs = Date.now() - rt0;
+        continue;
+      }
+
+      // The enter-phase probes need the app RENDERED, and goto now resolves at
+      // domcontentloaded rather than networkidle — which shortened their window
+      // from up to 30s of JS execution to settleMs. 'load' fires once the bundle
+      // has run, which restores it without restoring networkidle's guaranteed
+      // timeout. Best-effort: a page that never fires load is not a finding.
+      await page.waitForLoadState('load', { timeout: config.timing.loadStateTimeoutMs }).catch(() => {});
 
       // (b) waitFor — a selector only THIS page renders. Without it a router
       // bounce is indistinguishable from a slow render, and the monkey happily
@@ -155,14 +220,14 @@ export async function runMonkey(config, { onLog } = {}) {
           // then location.replace('/login') swapped it out a tick later.
           // Re-querying the current document is what turns that near-miss into
           // an honest "not reached".
-          await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
+          await page.waitForLoadState('domcontentloaded', { timeout: config.timing.loadStateTimeoutMs }).catch(() => {});
           present = !!(await page.$(route.waitFor));
         } catch {
           present = false;
         }
         if (!present) {
           ps.unreached = `waitFor "${route.waitFor}" is not present (landed on ${pathOf(page.url())})`;
-          say(`webapp-qa:   NOT REACHED — ${ps.unreached}`);
+          say(`mischief:   NOT REACHED — ${ps.unreached}`);
           ps.durationMs = Date.now() - rt0;
           continue;
         }
@@ -170,10 +235,12 @@ export async function runMonkey(config, { onLog } = {}) {
 
       // (c) landed-URL check — cheap, needs no per-app selector, and catches the
       // single most common drift: a route that quietly became a redirect.
-      const landed = pathOf(page.url());
-      if (landed !== pathOf(config.baseOrigin + route.path)) {
+      // samePath, not pathOf: trailing-slash normalization is not drift, and
+      // flagging it on every route buried the redirects that are.
+      const landed = samePath(page.url());
+      if (landed !== samePath(config.baseOrigin + route.path)) {
         ps.redirectedTo = landed;
-        say(`webapp-qa:   redirected → ${landed}`);
+        say(`mischief:   redirected → ${landed}`);
       }
 
       // (a) verification, once, on the first requiresAuth route we actually load.
@@ -183,13 +250,14 @@ export async function runMonkey(config, { onLog } = {}) {
         state.verification = v;
         if (!v.ok) {
           await cleanup();
+          // "whatever the app rendered instead", not "redirected to": with inline
+          // gating there is no redirect at all — the login form is at this url.
           return abandon(
-            `session verification FAILED on ${route.path} — ${v.how}. ` +
-              `The run would have tested whatever the app redirected to and called it a pass.`,
-            { partial: true },
+            `session verification FAILED on ${route.path} — ${v.how}.${v.detail ? ` ${v.detail}` : ''} ` +
+              `The run would have tested whatever the app rendered instead and called it a pass.`,
           );
         }
-        say(`webapp-qa: session verified (${v.how})`);
+        say(`mischief: session verified (${v.how})`);
       }
 
       await runProbes(page, ps, config, 'enter');
@@ -203,11 +271,16 @@ export async function runMonkey(config, { onLog } = {}) {
       for (let stepN = 1; stepN <= stepCount; stepN++) {
         state.stepIndex = stepN;
         ps.steps++;
-        await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
+        await page.waitForLoadState('domcontentloaded', { timeout: config.timing.loadStateTimeoutMs }).catch(() => {});
         const name = pickWeighted(master, routeEntries);
         ctx.rng = deriveStepRng(config.seed, ri, stepN); // see rng.mjs for why
+        state.stepDidWork = false;
         try {
           await registry[name](ctx);
+          // Counted only for steps that COMPLETED: a step that threw is already a
+          // finding, and counting it twice would let stepFailures alone trip the
+          // no-op verdict.
+          if (!state.stepDidWork) ps.noopSteps++;
         } catch (e) {
           // A step failure is a finding, never a crash. One unclickable element
           // must not cost you the other 39 steps.
@@ -230,12 +303,22 @@ export async function runMonkey(config, { onLog } = {}) {
         await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => {});
         state.mobileEmulated = false;
       }
+      // Reset alongside the others: offlineMode sets this flag before the CDP call
+      // that can throw, and a stuck `true` tags every later request failure as
+      // self-inflicted and suppresses the findings.
+      state.offlineWindow = false;
 
       await runProbes(page, ps, config, 'exit');
       if (config.report.pageScreenshots) {
-        const shotPath = path.join(shotsDir, `page-${slugOf(route.path)}.jpeg`);
+        const shotPath = path.join(shotsDir, `page-${routeSlugs[ri]}.jpeg`);
         try {
-          await page.screenshot({ path: shotPath, type: 'jpeg', quality: 50, fullPage: true, timeout: 15000 });
+          await page.screenshot({
+            path: shotPath,
+            type: 'jpeg',
+            quality: config.report.screenshotQuality,
+            fullPage: true,
+            timeout: config.timing.gotoTimeoutMs,
+          });
           ps.shot = path.relative(outDir, shotPath);
         } catch {}
       }
@@ -257,22 +340,25 @@ export async function runMonkey(config, { onLog } = {}) {
 
   // ---------------------------------------------------------------- helpers
 
-  function abandon(reason, { partial = false } = {}) {
+  function abandon(reason) {
     state.verified = false;
     state.unverifiedReason = reason;
-    say(`webapp-qa: ABANDONED — ${reason}`);
-    return finish({ fatal: null, durationMs: Date.now() - t0, partial });
+    say(`mischief: ABANDONED — ${reason}`);
+    return finish({ fatal: null, durationMs: Date.now() - t0 });
   }
 
   function finish({ fatal: f, durationMs }) {
     const summary = summarize(statsList, state, config);
-    // A route the harness never reached cannot contribute to a pass. Without
-    // this, a route list that has drifted into 404s exits 0 and reports "None."
-    // under every severity — the exact false green this package exists to stop.
-    if (state.verified !== false && summary.tot.unreached > 0) {
-      const names = statsList.filter((p) => p.unreached).map((p) => p.page);
-      state.verified = false;
-      state.unverifiedReason = `${summary.tot.unreached} route(s) were never reached: ${names.join(', ')}. Findings cover only the routes that loaded.`;
+    // Guarded on `!== false`: abandon() and the crash handler have already set a
+    // far more actionable reason, and both leave an all-zero statsList — so an
+    // unguarded coverage verdict would overwrite "session verification FAILED on
+    // /x" with the generic "NOTHING WAS TESTED".
+    if (state.verified !== false) {
+      const reasons = unverifiedReasons(statsList, summary, config);
+      if (reasons.length) {
+        state.verified = false;
+        state.unverifiedReason = reasons.join(' ');
+      }
     }
     const result = {
       runId,
@@ -283,13 +369,17 @@ export async function runMonkey(config, { onLog } = {}) {
       statsList,
       summary,
       findings: summary.findings,
+      // The --json projection. `clickable` is here because log.json's own `pages[]`
+      // carries it and a CI job reading --json found nothing about the census.
       pages: statsList.map((ps) => ({
         path: ps.page,
         steps: ps.steps,
+        noopSteps: ps.noopSteps,
         unreached: ps.unreached,
         skipped: ps.skipped,
         redirectedTo: ps.redirectedTo,
         durationMs: ps.durationMs,
+        clickable: ps.clickable,
       })),
       verified: state.verified !== false,
       unverifiedReason: state.unverifiedReason,
@@ -307,7 +397,7 @@ export async function runMonkey(config, { onLog } = {}) {
           if (r.name === 'json') result.logPath = p;
         }
       } catch (e) {
-        say(`webapp-qa: reporter "${r.name}" failed — ${(e && e.message) || e}`);
+        say(`mischief: reporter "${r.name}" failed — ${(e && e.message) || e}`);
       }
     }
     result.exitCode = exitCodeFor({
@@ -318,6 +408,44 @@ export async function runMonkey(config, { onLog } = {}) {
     });
     return result;
   }
+}
+
+/**
+ * The result shape for a failure BEFORE anything exists to report on.
+ *
+ * runMonkey documents itself as never throwing and always returning an exitCode,
+ * which the three pre-flight resolvers used to break — and they did it after
+ * mkdirSync, leaving an empty run directory behind on every bad config. There is
+ * no statsList and no reporter to write with, so this returns exit 3 with the
+ * fields every caller reads, and writes nothing at all.
+ */
+function preflightFailure({ runId, config, startDate, error, why }) {
+  const summary = {
+    tot: { steps: 0, unreached: 0, redirected: 0, skipped: 0, noClickable: 0 },
+    findings: [{ severity: 'unverified', kind: 'preflight', page: '-', message: why }],
+    critCount: 0,
+    highCount: 0,
+    gates: 0,
+  };
+  return {
+    runId,
+    seed: config.seed,
+    config,
+    routes: [],
+    state: { verified: false, unverifiedReason: why },
+    statsList: [],
+    summary,
+    findings: summary.findings,
+    pages: [],
+    verified: false,
+    unverifiedReason: why,
+    startDate,
+    durationMs: 0,
+    fatal: error,
+    reportPaths: [],
+    logPath: null,
+    exitCode: EXIT.UNVERIFIED,
+  };
 }
 
 /**

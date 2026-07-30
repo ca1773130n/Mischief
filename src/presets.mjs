@@ -10,11 +10,27 @@
  * Put `data-qa-ignore` on destructive controls; do not rely on the regex alone.
  */
 export const danger = {
-  en: /(logout|sign\s?out|delete|remove|revoke|checkout|subscribe|pay|purchase|cancel\s+subscription|reset|clear\s+all|deactivate|terminate|destroy)/i,
+  // `log\s?out`, not `logout`: "Log out" is one of the two commonest destructive
+  // labels in English and the space made it invisible to the guardrail.
+  en: /(log\s?out|sign\s?out|delete|remove|revoke|checkout|subscribe|pay|purchase|cancel\s+subscription|reset|clear\s+all|deactivate|terminate|destroy)/i,
   ko: /(삭제|지우기|탈퇴|해지|로그아웃|구독|결제|초기화|비우기|결제하기|해지하기)/i,
   ja: /(削除|退会|解約|ログアウト|購入|決済|支払い|初期化|リセット)/i,
   zh: /(删除|注销|退订|登出|退出登录|购买|支付|结算|重置|清空)/i,
 };
+
+/**
+ * Every language above, and the DEFAULT for guardrails.dangerPattern.
+ *
+ * `en` used to be the default, which meant a Korean, Japanese or Chinese app got
+ * ZERO destructive-click protection out of the box — `danger.en.test('삭제')` is
+ * false — and the only hint was a Recipes section in the README. A safety default
+ * you have to read documentation to switch on is not a default.
+ *
+ * Widening a refusal list can only ever cost coverage (a control the monkey
+ * declines to click); narrowing it costs the user's data. Narrow it to your own
+ * locale deliberately, if you want the coverage back.
+ */
+danger.all = combinePatterns(danger.en, danger.ko, danger.ja, danger.zh);
 
 /**
  * Markup that leaked into rendered TEXT. Off by default: which of these counts
@@ -49,7 +65,13 @@ export const consoleIgnore = {
   vite: [/\[vite\] connect(ed|ing)/],
 };
 
-/** Combine several patterns into one case-insensitive alternation. */
+/**
+ * Combine several patterns into one case-insensitive alternation.
+ *
+ * Declared as a function statement, not a const: `danger.all` above is built
+ * from it at module-evaluation time, and a `const` would still be in its
+ * temporal dead zone there.
+ */
 export function combinePatterns(...res) {
   const parts = res.filter(Boolean).map((r) => `(?:${r.source})`);
   return new RegExp(parts.join('|'), 'i');

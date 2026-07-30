@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// webapp-qa — seeded, guard-railed browser chaos QA.
+// mischief — seeded, guard-railed browser chaos QA.
 // Exit codes: 0 clean · 1 HIGH · 2 CRITICAL · 3 harness/verification failure.
 
 import fs from 'node:fs';
@@ -10,18 +10,19 @@ import { resolveConfig, ConfigError } from '../src/config.mjs';
 import { EXIT } from '../src/severity.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_NAMES = ['webapp-qa.config.mjs', 'webapp-qa.config.js', 'qa.config.mjs'];
+const CONFIG_NAMES = ['mischief.config.mjs', 'mischief.config.js', 'qa.config.mjs'];
 
-const USAGE = `webapp-qa — seeded monkey testing in a real browser
+const USAGE = `mischief — seeded monkey testing in a real browser
 
-  webapp-qa [options]              run
-  webapp-qa init                   scaffold webapp-qa.config.mjs here
-  webapp-qa replay <runId>         re-run a previous run's exact seed/routes/steps
+  mischief [options]              run
+  mischief init                   scaffold mischief.config.mjs here
+  mischief replay <runId>         re-run a previous run's exact seed/routes/steps
 
 Options
   --config <file>     config file (default: ${CONFIG_NAMES.join(' | ')} in cwd)
   --base <url>        base URL under test
-  --routes <csv>      comma-separated paths, overriding the config's route list
+  --routes <csv>      FILTER the configured routes to these paths — each one keeps
+                      its requiresAuth/waitFor; unknown paths are added as-is
   --steps <n>         steps per route
   --seed <n>          replay a specific walk
   --mutators <csv>    restrict to these mutators
@@ -32,6 +33,7 @@ Options
   --headed            launch mode: show the browser
   --allow-prod        permit a base URL outside allowedHosts
   --allow-anonymous   run without a session; every requiresAuth route is SKIPPED
+  --quiet             suppress per-step progress output
   --json              print the machine-readable result to stdout
   -h, --help
 
@@ -98,9 +100,9 @@ async function loadConfigFile(explicit) {
 }
 
 function cmdInit() {
-  const target = path.resolve(process.cwd(), 'webapp-qa.config.mjs');
+  const target = path.resolve(process.cwd(), 'mischief.config.mjs');
   if (fs.existsSync(target)) die(`${target} already exists — not overwriting.`, 1);
-  fs.copyFileSync(path.join(__dirname, '..', 'templates', 'webapp-qa.config.mjs'), target);
+  fs.copyFileSync(path.join(__dirname, '..', 'templates', 'mischief.config.mjs'), target);
   console.log(`created ${target}`);
 
   // Reports are runtime artifacts. Without this, the first run leaves dozens of
@@ -112,7 +114,7 @@ function cmdInit() {
     fs.writeFileSync(gi, existing + (existing && !existing.endsWith('\n') ? '\n' : '') + `${line}\n`);
     console.log(`added "${line}" to ${gi}`);
   }
-  console.log('\nNext: edit baseUrl + routes, then run `webapp-qa`.');
+  console.log('\nNext: edit baseUrl + routes, then run `mischief`.');
 }
 
 /**
@@ -132,7 +134,7 @@ async function replayOverrides(runId, cfg, cwd, outOverride) {
   if (!logPath) die(`No log for run "${runId}". Looked in:\n  ${candidates.filter((p) => p.endsWith('log.json')).join('\n  ')}`);
   const log = JSON.parse(fs.readFileSync(logPath, 'utf8'));
   const c = log.config || {};
-  console.log(`webapp-qa: replaying ${runId} — seed ${c.seed}, ${(c.routes || []).length} route(s), ${c.steps} steps`);
+  console.log(`mischief: replaying ${runId} — seed ${c.seed}, ${(c.routes || []).length} route(s), ${c.steps} steps`);
   return {
     seed: c.seed,
     steps: c.steps,
@@ -146,7 +148,7 @@ async function main() {
   if (o.command === 'init') return cmdInit();
 
   const { cfg: fileCfg, path: cfgPath } = await loadConfigFile(o.configPath);
-  if (cfgPath) console.log(`webapp-qa: config ${cfgPath}`);
+  if (cfgPath) console.log(`mischief: config ${cfgPath}`);
 
   let overrides = o.overrides;
   if (o.command === 'replay') {
@@ -174,22 +176,28 @@ async function main() {
 
   if (config.browser.mode === 'attach') {
     console.error(
-      `webapp-qa: ATTACH MODE — driving the browser at ${config.browser.cdpUrl}, in whatever profile it is signed into.\n` +
-        `           Clicks are real. Guardrail: ${config.guardrails.dangerPattern}`,
+      `mischief: ATTACH MODE — driving the browser at ${config.browser.cdpUrl}, in whatever profile it is signed into.\n` +
+        `           Clicks are real. Mouse clicks AND Enter/Space activations are checked against\n` +
+        `           guardrails.dangerPattern, which matches a control's VISIBLE LABEL only — an\n` +
+        `           icon-only destructive button with no accessible name is invisible to it.\n` +
+        `           Guardrail: ${config.guardrails.dangerPattern}`,
     );
   }
   if (config.allowAnonymous && config.auth.strategy === 'none') {
-    console.error('webapp-qa: ANONYMOUS RUN — every route declaring requiresAuth will be SKIPPED, not tested.');
+    console.error('mischief: ANONYMOUS RUN — every route declaring requiresAuth will be SKIPPED, not tested.');
   }
   if (config.allowProd) {
-    console.error(`webapp-qa: --allow-prod — ${config.baseUrl} is outside allowedHosts and is being monkeyed anyway.`);
+    console.error(`mischief: --allow-prod — ${config.baseUrl} is outside allowedHosts and is being monkeyed anyway.`);
   }
+  // Derived by resolveConfig. Printed before the browser opens, so a route that
+  // cannot prove it arrived is flagged while you still have the terminal open.
+  for (const w of config.warnings || []) console.error(`mischief: WARNING — ${w}`);
 
   let result;
   try {
     result = await runMonkey(config);
   } catch (e) {
-    die(`webapp-qa: FATAL before the run loop — ${(e && e.stack) || e}`);
+    die(`mischief: FATAL before the run loop — ${(e && e.stack) || e}`);
   }
 
   if (o.json) {
@@ -216,7 +224,7 @@ async function main() {
 
   const md = result.reportPaths.find((p) => p.endsWith('.md'));
   console.log(
-    `webapp-qa: done — ${result.summary.critCount} critical, ${result.summary.highCount} high` +
+    `mischief: done — ${result.summary.critCount} critical, ${result.summary.highCount} high` +
       `${result.verified ? '' : ' — NOT VERIFIED'} (exit ${result.exitCode})`,
   );
   if (md) console.log(`REPORT: ${md}`);
@@ -224,6 +232,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error('webapp-qa: fatal —', (e && e.stack) || e);
+  console.error('mischief: fatal —', (e && e.stack) || e);
   process.exit(EXIT.UNVERIFIED);
 });
