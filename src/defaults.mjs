@@ -188,7 +188,7 @@ export const DEFAULT_CONFIG = {
     // "could not test" on that evidence would hide the bug this package exists
     // to surface. Set to 0 to disable the rule.
     deadOriginMinFailures: 3,
-    classifyResponse: null, // ({ status, url, method, watched }) => 'critical'|'high'|'gate'|'ignore'
+    classifyResponse: null, // ({ status, url, method, watched }) => 'critical'|'high'|'gate'|'throttled'|'ignore'
     slow3g: SLOW_3G,
     normal: NET_NORMAL,
     offline: NET_OFFLINE,

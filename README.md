@@ -217,11 +217,12 @@ found.
 | `timing.settlePollAttempts` / `.settlePollMs` | `8` / `250` | candidate-settle poll, shared by the census and every click |
 | `timing.historyTimeoutMs` / `.reloadTimeoutMs` | `8000` / `30000` | `randomBack` / `refresh` budgets |
 | `timing.stepPauseMinMs` / `.stepPauseJitterMs` | `150` / `250` | pause between steps |
+| `timing.rateLimitBackoffMs` / `.rateLimitMaxPauseMs` | `2000` / `30000` | added to the step pause per 429, doubling, capped |
 | `network.consoleIgnore` | `[]` | regexes for known framework noise; see `presets.consoleIgnore` |
 | `network.slowRequestMs` | `10000` | slow-request threshold |
 | `network.watchOrigins` | `[]` | extra origins to classify beside `baseUrl` — **set this if your API is on another port** |
 | `network.loginAdjacent` | see source | URLs where a 401 is a gate, not a defect; matched against URLs, so localized paths need extending |
-| `network.classifyResponse` | – | `({status,url,method,watched}) => 'critical'\|'high'\|'gate'\|'ignore'` |
+| `network.classifyResponse` | – | `({status,url,method,watched}) => 'critical'\|'high'\|'gate'\|'throttled'\|'ignore'` |
 | `network.slow3g` / `.normal` / `.offline` | CDP profiles | what `slowNetwork` / `offlineMode` emulate |
 | `viewports.mobile` / `.desktop` | 390×844 / 1440×900 | what `mobileResize` toggles between |
 | `input.invalidValues` | 6 values | what `invalidInput` types |
@@ -385,6 +386,15 @@ otherwise a 500ing API produces zero findings. The watched set is printed in the
 report header, so "no 5xx" is distinguishable from "your API was never looked at".
 `network.classifyResponse` sees every response, watched or not, with a `watched`
 flag.
+
+**429 is not a finding about your app.** The monkey's default 150-400ms gap
+between steps is faster than a small backend will answer, so a rate limit means
+the harness outran the server, not that the page is broken. A 429 is classified
+`throttled`: it is reported MEDIUM, never as a 4xx, never fails the run, and each
+one widens the step pause — `Retry-After` if the server sent one, otherwise
+doubling from `timing.rateLimitBackoffMs` to `timing.rateLimitMaxPauseMs`. The
+pause is sticky for the rest of the run. If you would rather pace the whole walk
+from the start, raise `timing.stepPauseMinMs` instead.
 
 ---
 
