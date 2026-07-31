@@ -40,7 +40,14 @@ jobs:
           # The suite runs on node:test's --test glob, which needs >= 21, while
           # the package itself supports >= 18 (see engines).
           node-version: 24
-          registry-url: 'https://registry.npmjs.org'
+          # DELIBERATELY no registry-url. Setting it makes setup-node write
+          # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into an .npmrc,
+          # and with no token in the environment that line expands to empty —
+          # npm then reads it, concludes auth is already configured, and never
+          # starts the OIDC exchange at all. The publish fails as unauthenticated
+          # with a trusted publisher sitting there correctly configured.
+          # See actions/setup-node#1551. registry.npmjs.org is the default
+          # registry anyway, so nothing is lost by omitting it.
 
       # setup-node pins whatever npm shipped with the Node build; OIDC needs
       # >= 11.5.1, so ask for it explicitly rather than hoping.
@@ -48,6 +55,19 @@ jobs:
         run: |
           npm install -g npm@latest
           npm --version
+
+      # Belt and braces for the above: if any step ever reintroduces an
+      # _authToken line, strip it rather than let it silently disable OIDC.
+      - name: Make sure nothing is pretending to be authenticated
+        run: |
+          for f in "$HOME/.npmrc" "$NPM_CONFIG_USERCONFIG"; do
+            if [ -n "$f" ] && [ -f "$f" ]; then
+              sed -i '/_authToken/d' "$f"
+              echo "scrubbed _authToken from $f"
+            fi
+          done
+          echo "--- effective auth config ---"
+          npm config list | grep -i "registry\|token" || true
 
       - run: npm ci
 
@@ -72,6 +92,15 @@ jobs:
         if: ${{ github.event_name == 'release' }}
         run: npm publish
 
-      - name: Dry run (manual dispatch)
+      # `npm publish --dry-run` is the wrong check here: between releases the
+      # committed version is ALREADY on the registry, so it exits 1 with "cannot
+      # publish over the previously published versions" and reports a healthy
+      # pipeline as broken. Pack instead — it validates exactly what a manual run
+      # can validate (files list, tarball contents) without asserting the version
+      # is new, which only a release can be expected to satisfy.
+      - name: Pack (manual dispatch)
         if: ${{ github.event_name != 'release' }}
-        run: npm publish --dry-run
+        run: |
+          npm pack --dry-run
+          echo "committed version: $(node -p "require('./package.json').version")"
+          echo "on registry:       $(npm view mischief version 2>/dev/null || echo 'not published')"
