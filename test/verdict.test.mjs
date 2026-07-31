@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { newRouteStats, normalizeRoute } from '../src/routes.mjs';
+import { backOff, defaultClassifyResponse } from '../src/collect.mjs';
 import { resolveConfig } from '../src/config.mjs';
 import { runMonkey } from '../src/run.mjs';
 import {
@@ -544,4 +545,53 @@ test('an honest perf sample keeps its MEDIUM and says nothing about throttling',
   assert.equal(f.lcp.severity, 'medium');
   assert.equal(f.cls.severity, 'medium');
   assert.doesNotMatch(f.lcp.message, /throttling/);
+});
+
+// ------------------------------------------------------------ rate limiting
+
+test('a 429 is the harness outrunning the backend, not a HIGH app bug', () => {
+  // defaultClassifyResponse used to fall through to 'high' for 429, so a small
+  // backend that rate-limited the monkey's own 150-400ms step pace answered with
+  // http-4xx findings and exit 1 — the harness filing its own load as the app's
+  // bug, on a run whose coverage the throttling had already degraded.
+  const c = cfg();
+  assert.equal(defaultClassifyResponse({ status: 429, url: 'http://localhost:3000/rest/v1/t', watched: true }, c), 'throttled');
+
+  const list = [
+    ps('/a', {
+      steps: 40,
+      clickable: clicked(),
+      rateLimited: [{ method: 'GET', url: '/rest/v1/t', status: 429, action: 'click button' }],
+    }),
+  ];
+  const { findings, tot, critCount, highCount } = summarize(list, state(), c);
+
+  assert.equal(tot.rateLimited, 1);
+  assert.equal(highCount, 0, 'a rate limit must not fail the run');
+  assert.equal(exitCodeFor({ verified: true, fatal: false, critCount, highCount }), EXIT.CLEAN);
+
+  const f = findings.find((x) => x.kind === 'rate-limited');
+  assert.equal(f.severity, 'medium');
+  assert.match(f.message, /outran the backend/);
+  assert.equal(findings.some((x) => x.kind === 'http-4xx'), false, '429 must never be reported as a 4xx');
+});
+
+test('backOff escalates, honours Retry-After, and stops at the ceiling', () => {
+  const c = cfg();
+  const s = { rateLimitPauseMs: 0 };
+
+  backOff(s, undefined, c);
+  assert.equal(s.rateLimitPauseMs, c.timing.rateLimitBackoffMs);
+  backOff(s, undefined, c);
+  assert.equal(s.rateLimitPauseMs, c.timing.rateLimitBackoffMs * 2, 'each further 429 doubles the pause');
+
+  backOff(s, '30', c);
+  assert.equal(s.rateLimitPauseMs, 30000, 'Retry-After seconds override the exponential step');
+
+  backOff(s, '9999', c);
+  assert.equal(s.rateLimitPauseMs, c.timing.rateLimitMaxPauseMs, 'a hostile Retry-After cannot stall the run');
+
+  // Never decays: a later 429 with no hint must not walk the pause back down.
+  backOff(s, undefined, c);
+  assert.equal(s.rateLimitPauseMs, c.timing.rateLimitMaxPauseMs);
 });

@@ -79,6 +79,15 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     `- totals: ${tot.steps} steps · ${tot.jsExc} JS exceptions · ${tot.n5} 5xx · ${tot.n4} 4xx · ` +
       `${tot.cerr} console errors · ${tot.text} text-pattern hits · ${state.gates.length} gates · ${state.skippedDanger.length} danger-skips`,
   );
+  // Header-level, not buried under MEDIUM: once the backend starts refusing load
+  // the walk is no longer the walk that was configured, and every timing number
+  // below it was measured against a throttled server.
+  if (tot.rateLimited) {
+    L.push(
+      `- **rate limited: ${tot.rateLimited} × 429** — the harness outran the backend and backed off to ` +
+        `+${state.rateLimitPauseMs}ms per step. Raise \`timing.stepPauseMinMs\` to pace the whole run instead.`,
+    );
+  }
   if (tot.unreached || tot.redirected || tot.skipped || tot.noClickable) {
     const exercised = statsList.filter(routeWasTested).length;
     L.push(

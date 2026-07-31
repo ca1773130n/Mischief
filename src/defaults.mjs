@@ -241,6 +241,12 @@ export const DEFAULT_CONFIG = {
     reloadTimeoutMs: 30000,
     stepPauseMinMs: 150,
     stepPauseJitterMs: 250,
+    // Added to the step pause once the app answers 429, then doubled per 429 up
+    // to the ceiling. A `Retry-After` in seconds overrides both. The monkey's
+    // default 150-400ms gap is faster than a small backend can serve, so without
+    // this a rate-limited run just keeps hammering and reports the limit as bugs.
+    rateLimitBackoffMs: 2000,
+    rateLimitMaxPauseMs: 30000,
   },
 
   report: {

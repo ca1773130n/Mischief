@@ -61,6 +61,7 @@ export async function runMonkey(config, { onLog } = {}) {
     ps: statsList[0],
     offlineWindow: false,
     slowStepsRemaining: 0,
+    rateLimitPauseMs: 0, // grows on 429, never decays — see backOff() in collect.mjs
     mobileEmulated: false,
     closing: false,
     errShots: 0,
@@ -292,7 +293,11 @@ export async function runMonkey(config, { onLog } = {}) {
         if (name !== 'slowNetwork' && state.slowStepsRemaining > 0 && --state.slowStepsRemaining === 0) {
           await restoreNetwork(ctx);
         }
-        await sleep(config.timing.stepPauseMinMs + Math.floor(master() * config.timing.stepPauseJitterMs));
+        await sleep(
+          config.timing.stepPauseMinMs +
+            Math.floor(master() * config.timing.stepPauseJitterMs) +
+            state.rateLimitPauseMs,
+        );
       }
 
       // Leave the next route a clean slate: unthrottled, default metrics.

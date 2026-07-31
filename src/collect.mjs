@@ -22,7 +22,35 @@ export function defaultClassifyResponse({ status, url, watched = true }, config)
   if (status >= 500) return 'critical';
   if (status === 402 || status === 403) return 'gate';
   if (status === 401 && config.network.loginAdjacent.test(url)) return 'gate';
+  // 429 is not an app bug. It is this harness clicking faster than the backend
+  // will answer, and reporting it as 'high' both blamed the app for load the
+  // monkey generated and — because HIGH is exit 1 — failed the run for it.
+  if (status === 429) return 'throttled';
   return 'high';
+}
+
+/**
+ * Widen the step pause after a 429 so the monkey stops outrunning the backend.
+ *
+ * Sticky and session-wide at the highest value seen — it never decays. One
+ * throttled route therefore slows every route after it, which is deliberate: the
+ * alternative re-discovers the limit on each new route by generating fresh 429s
+ * against a backend that has already said no.
+ *
+ * ponytail: no decay, and Retry-After is honoured only in its seconds form. If a
+ * long run ends up over-paced by one early burst, decay per route before making
+ * the escalation cleverer.
+ */
+export function backOff(state, retryAfter, config) {
+  const t = config.timing;
+  const hinted = Number(retryAfter);
+  const next =
+    Number.isFinite(hinted) && hinted > 0
+      ? hinted * 1000
+      : state.rateLimitPauseMs
+        ? state.rateLimitPauseMs * 2
+        : t.rateLimitBackoffMs;
+  state.rateLimitPauseMs = Math.min(Math.max(state.rateLimitPauseMs || 0, next), t.rateLimitMaxPauseMs);
 }
 
 function lastActionDesc(state) {
@@ -154,7 +182,10 @@ export function wireCollectors(page, state, baseOrigin, config) {
       const verdict = classify({ status, url, method: rec.method, watched: rec.watched });
       if (verdict === 'critical') state.ps.net5xx.push(rec);
       else if (verdict === 'gate') state.gates.push({ ...rec, page: state.currentRoutePath });
-      else if (verdict === 'high') state.ps.net4xx.push(rec);
+      else if (verdict === 'throttled') {
+        state.ps.rateLimited.push(rec);
+        backOff(state, res.headers()['retry-after'], config);
+      } else if (verdict === 'high') state.ps.net4xx.push(rec);
     } catch {}
   });
 }

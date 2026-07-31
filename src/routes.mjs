@@ -92,6 +92,9 @@ export function newRouteStats(route) {
     consoleDropped: { error: 0, warning: 0 },
     net4xx: [],
     net5xx: [],
+    // 429s. Kept out of net4xx on purpose: a rate limit is the harness outrunning
+    // the backend, not a bug in the page. See defaultClassifyResponse.
+    rateLimited: [],
     requestFailures: [],
     requestFailuresDropped: 0,
     slowRequests: [],

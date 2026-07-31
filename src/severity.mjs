@@ -1,4 +1,4 @@
-import { trunc } from './util.mjs';
+import { groupCount, trunc } from './util.mjs';
 
 export const EXIT = {
   CLEAN: 0,
@@ -187,7 +187,7 @@ export function summarize(statsList, state, config) {
   const tot = {
     steps: 0, jsExc: 0, n4: 0, n5: 0, cerr: 0, cwarn: 0, a11y: 0, broken: 0,
     overflow: 0, text: 0, slow: 0, stepFail: 0, unreached: 0, redirected: 0, skipped: 0,
-    noClickable: 0,
+    noClickable: 0, rateLimited: 0,
   };
   const findings = [];
   const add = (severity, kind, page, message, extra) => findings.push({ severity, kind, page, message, ...extra });
@@ -197,6 +197,7 @@ export function summarize(statsList, state, config) {
     tot.jsExc += ps.jsExceptions.length;
     tot.n4 += ps.net4xx.length;
     tot.n5 += ps.net5xx.length;
+    tot.rateLimited += ps.rateLimited.length;
     tot.cerr += ps.consoleErrors.length + ps.consoleDropped.error;
     tot.cwarn += ps.consoleWarnings.length + ps.consoleDropped.warning;
     tot.broken += ps.brokenImages.size;
@@ -275,6 +276,12 @@ export function summarize(statsList, state, config) {
         `LCP ${(ps.perf.lcp / 1000).toFixed(1)}s > ${(config.thresholds.lcpMs / 1000).toFixed(1)}s${ps.netDegraded ? ' — measured while the harness was throttling; not an app finding' : ''}`);
     for (const s of ps.slowRequests) if (!s.throttled) add('medium', 'slow-request', ps.page, `${(s.ms / 1000).toFixed(1)}s ${s.url}`);
     for (const f of ps.stepFailures) add('medium', 'step-failure', ps.page, `${f.mutator}: ${trunc(f.error, 120)}`);
+    // MEDIUM, never HIGH: the backend refused load this harness generated, so
+    // failing the run on it would report the monkey's own pace as the app's bug.
+    for (const g of groupCount(ps.rateLimited, (r) => `${r.method} ${r.url}`))
+      add('medium', 'rate-limited', ps.page, `429 ×${g.count} on ${g.key} — the harness outran the backend`, {
+        action: g.sample.action,
+      });
     if (ps.gotoNote) add('medium', 'goto', ps.page, ps.gotoNote);
     if (ps.a11y) {
       const a = ps.a11y;
