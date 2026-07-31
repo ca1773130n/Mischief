@@ -1,6 +1,6 @@
 {
   "name": "mischief",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Seeded, guard-railed monkey testing for web apps in a real browser. Every finding replays from its seed; a run that could not reach the page it asked for fails instead of passing.",
   "keywords": [
     "qa",

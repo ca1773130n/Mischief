@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.1
+
+Release-automation only; the package itself is unchanged from 0.1.0.
+
+- Publishing moves to npm trusted publishing (GitHub OIDC). No token or other
+  long-lived credential exists in the repository, and released versions carry a
+  provenance attestation.
+- `.github/workflows/publish.yml` runs the full suite, including the
+  real-Chromium browser suites, and refuses to publish a tarball containing
+  origin-app residue.
+
+## 0.1.0
 
 Extracted from a single-app monkey harness into a configurable package. Nothing
 app-specific survives outside `examples/`, and a test sweeps every shipped file to
