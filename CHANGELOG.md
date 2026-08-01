@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.2
+
+A 429 is no longer reported as a bug in your app.
+
+- `defaultClassifyResponse` fell through to `'high'` for 429, so a backend
+  slower than the monkey's 150-400ms step pace answered with `http-4xx`
+  findings and exit 1 — the harness filing load it had generated itself as the
+  application's defect, on a run whose coverage the throttling had already
+  degraded.
+- 429 now classifies as `throttled`: its own MEDIUM finding, never `http-4xx`,
+  never a reason to fail a run, and called out in the report header because a
+  throttled run's timing numbers were measured against a throttled server.
+- Each 429 widens the step pause — `Retry-After` seconds when the server sends
+  one, otherwise doubling from `timing.rateLimitBackoffMs` (2s) up to
+  `timing.rateLimitMaxPauseMs` (30s). Sticky for the rest of the run, so the
+  harness does not re-discover the limit on every route.
+- `network.classifyResponse` may now return `'throttled'`. Existing classifiers
+  are unaffected; they simply never return it.
+
 ## 0.1.1
 
 Release-automation only; the package itself is unchanged from 0.1.0.
