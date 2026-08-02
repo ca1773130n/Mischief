@@ -76,7 +76,11 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
   L.push(`- steps/page: ${config.steps}`);
   L.push(`- started: ${startDate.toISOString()} · duration: ${(durationMs / 1000).toFixed(1)}s`);
   L.push(
-    `- totals: ${tot.steps} steps · ${tot.jsExc} JS exceptions · ${tot.n5} 5xx · ${tot.n4} 4xx · ` +
+    // The offline count is shown rather than dropped: those exceptions are real
+    // events, they just say something about the harness instead of the app.
+    `- totals: ${tot.steps} steps · ${tot.jsExc} JS exceptions` +
+      `${tot.jsExcOffline ? ` (+${tot.jsExcOffline} while offline, not counted)` : ''} · ` +
+      `${tot.n5} 5xx · ${tot.n4} 4xx · ` +
       `${tot.cerr} console errors · ${tot.text} text-pattern hits · ${state.gates.length} gates · ${state.skippedDanger.length} danger-skips`,
   );
   // Header-level, not buried under MEDIUM: once the backend starts refusing load

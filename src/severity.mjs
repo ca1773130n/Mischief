@@ -185,7 +185,7 @@ export function unverifiedReasons(statsList, summary, config, state = {}) {
  */
 export function summarize(statsList, state, config) {
   const tot = {
-    steps: 0, jsExc: 0, n4: 0, n5: 0, cerr: 0, cwarn: 0, a11y: 0, broken: 0,
+    steps: 0, jsExc: 0, jsExcOffline: 0, n4: 0, n5: 0, cerr: 0, cwarn: 0, a11y: 0, broken: 0,
     overflow: 0, text: 0, slow: 0, stepFail: 0, unreached: 0, redirected: 0, skipped: 0,
     noClickable: 0, rateLimited: 0,
   };
@@ -194,7 +194,16 @@ export function summarize(statsList, state, config) {
 
   for (const ps of statsList) {
     tot.steps += ps.steps;
-    tot.jsExc += ps.jsExceptions.length;
+    // An exception thrown while WE held the connection offline is the
+    // offlineMode mutator's own doing, not the app's. A lazy-loaded route
+    // cannot fetch its chunk with the network cut, so a code-split SPA throws
+    // on every offline window — and every one of them was landing in critCount.
+    // Counted separately so `critical` keeps meaning "the app is broken".
+    // (consoleErrors and requestFailures have drawn this line all along; the
+    // `duringOffline` flag was already recorded here, just never read.)
+    const selfInflicted = ps.jsExceptions.filter((e) => e.duringOffline).length;
+    tot.jsExc += ps.jsExceptions.length - selfInflicted;
+    tot.jsExcOffline += selfInflicted;
     tot.n4 += ps.net4xx.length;
     tot.n5 += ps.net5xx.length;
     tot.rateLimited += ps.rateLimited.length;
@@ -210,7 +219,10 @@ export function summarize(statsList, state, config) {
     if (ps.skipped) tot.skipped++;
     if (ps.a11y) tot.a11y += ps.a11y.imgsNoAlt.count + ps.a11y.unlabeledButtons.count + ps.a11y.unlabeledInputs.count;
 
-    for (const e of ps.jsExceptions) add('critical', 'js-exception', ps.page, e.message, { action: e.action, shot: e.shot });
+    for (const e of ps.jsExceptions)
+      add(e.duringOffline ? 'low' : 'critical', 'js-exception', ps.page,
+        `${e.message}${e.duringOffline ? ' — thrown while the harness held the connection offline; not an app finding' : ''}`,
+        { action: e.action, shot: e.shot, duringOffline: !!e.duringOffline });
     for (const r of ps.net5xx) add('critical', 'http-5xx', ps.page, `${r.method} ${r.url} → ${r.status}`, { action: r.action });
     for (const r of ps.net4xx) add('high', 'http-4xx', ps.page, `${r.method} ${r.url} → ${r.status}`, { action: r.action });
     for (const o of ps.overflow)

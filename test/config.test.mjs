@@ -80,6 +80,27 @@ test('a RegExp survives the merge instead of being flattened into an object', ()
   assert.equal(cfg.guardrails.ignoreAttribute, 'data-qa-ignore'); // sibling default kept
 });
 
+test('consoleIgnore strings are refused at load, not thrown from a page handler', () => {
+  // A plain string reaches collect.mjs's `re.test(text)` and throws from inside
+  // a page 'console' handler — uncaught, so the run dies on whatever route it
+  // first hits, writes no log.json, and exits 1, which is indistinguishable
+  // from real HIGH findings. The mistake is natural because
+  // presets.consoleIgnore is keyed by framework name.
+  const base = { baseUrl: 'http://localhost:3000' };
+  assert.throws(
+    () => resolveConfig({ ...base, network: { consoleIgnore: ['vite', 'vue'] } }),
+    /must be RegExp/,
+  );
+  assert.throws(
+    () => resolveConfig({ ...base, network: { consoleIgnore: [/ok/, null] } }),
+    /must be RegExp/,
+  );
+  // The legitimate shapes still resolve.
+  assert.ok(resolveConfig({ ...base, network: { consoleIgnore: [/\[vite\] connect/] } }));
+  assert.ok(resolveConfig({ ...base, network: { consoleIgnore: [] } }));
+  assert.ok(resolveConfig(base));
+});
+
 test('auth misconfiguration is caught before a browser opens', () => {
   const base = { baseUrl: 'http://localhost:3000' };
   assert.throws(() => resolveConfig({ ...base, auth: { strategy: 'localStorage', from: 'x.json' } }), /needs auth.key/);
