@@ -294,3 +294,22 @@ test('a cross-origin API is classified when watched, and ignored when not', () =
   assert.equal(defaultClassifyResponse({ status: 500, url: 'https://cdn.example/x.js', watched: false }, watching), 'ignore');
   assert.throws(() => resolveConfig({ baseUrl: 'http://localhost:3000', network: { watchOrigins: ['not a url'] } }), /not a URL/);
 });
+
+test('a consoleIgnore that is not an array is a ConfigError, not a raw TypeError', () => {
+  // `|| []` only guards FALSY values. A bare RegExp — the array simply forgotten,
+  // which is the most natural version of this mistake — is truthy and not
+  // iterable, so the for...of threw TypeError before the instanceof check ran.
+  // bin/mischief.mjs prints e.stack for anything that is not a ConfigError, so
+  // the one misconfiguration this validation exists to explain got a stack trace.
+  const base = { baseUrl: 'http://localhost:3000' };
+  for (const bad of [/vite/, { 0: /vite/ }, 'vite', 42, true]) {
+    assert.throws(
+      () => resolveConfig({ ...base, network: { consoleIgnore: bad } }),
+      (e) => e instanceof ConfigError && /consoleIgnore must be an array/.test(e.message),
+      `consoleIgnore: ${String(bad)} must fail as a ConfigError`,
+    );
+  }
+  // null/undefined still mean "unset", and arrays still take the per-entry path.
+  assert.ok(resolveConfig({ ...base, network: { consoleIgnore: null } }));
+  assert.throws(() => resolveConfig({ ...base, network: { consoleIgnore: ['vite'] } }), /must be RegExp/);
+});

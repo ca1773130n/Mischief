@@ -101,7 +101,20 @@ export function resolveConfig(fileConfig = {}, overrides = {}, cwd = process.cwd
   // HIGH findings. Every other field here fails loudly at load; this one did not.
   // The mistake is easy to make because presets.consoleIgnore is keyed by
   // framework name, so `['vue', 'vite']` looks exactly like the right thing.
-  for (const re of cfg.network.consoleIgnore || []) {
+  // Array.isArray first, not `|| []`. That only guards FALSY values, so the most
+  // natural version of the mistake — `consoleIgnore: /\[vite\] connect/`, the
+  // array simply forgotten — is truthy, not iterable, and the for...of threw a
+  // raw TypeError before the instanceof check ran. bin/mischief.mjs prints
+  // e.stack for anything that is not a ConfigError, so the one misconfiguration
+  // this block exists to explain got a stack trace instead of the explanation.
+  const ignore = cfg.network.consoleIgnore;
+  if (ignore != null && !Array.isArray(ignore)) {
+    throw new ConfigError(
+      `network.consoleIgnore must be an array of RegExp, got ${typeof ignore} (${JSON.stringify(String(ignore))}).\n` +
+        `  A single pattern still needs the array: [/\\[vite\\] connect(ed|ing)/].`,
+    );
+  }
+  for (const re of ignore || []) {
     if (!(re instanceof RegExp)) {
       throw new ConfigError(
         `network.consoleIgnore entries must be RegExp, got ${typeof re} (${JSON.stringify(re)}).\n` +
