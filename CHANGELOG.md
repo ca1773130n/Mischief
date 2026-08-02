@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.3
+
+Two fixes found by pointing mischief at a code-split Vue SPA. Both are cases
+where the harness reported its own behaviour as the app's fault.
+
+- **An exception thrown while the harness held the connection offline is no
+  longer `critical`.** A lazy-loaded route cannot fetch its chunk with the
+  network cut, so a code-split app throws on every `offlineMode` window — and
+  every one of those was landing in `critCount` and failing the run. They are now
+  `low`, labelled, counted separately, and shown in the totals line rather than
+  dropped. `critical` goes back to meaning "the app is broken". The `duringOffline`
+  flag had been recorded since the first commit and simply never read.
+- **`network.consoleIgnore` entries are validated at load.** A plain string
+  reached `re.test(text)` inside a page event handler and threw from there —
+  uncaught, so the run died on whatever route it hit first, wrote no report, and
+  exited 1, which is indistinguishable from real HIGH findings. The mistake is
+  natural because `presets.consoleIgnore` is keyed by framework name, so
+  `['vue', 'vite']` looks exactly right. A non-array value (the array simply
+  forgotten) is caught too, rather than throwing a raw `TypeError` past the
+  `ConfigError` handler.
+
+Both are reported in the rendered report, not only in `summarize()` — a demoted
+exception under a `CRITICAL (0)` heading was the first version of this fix.
+
 ## 0.1.2
 
 A 429 is no longer reported as a bug in your app.
