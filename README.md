@@ -210,6 +210,14 @@ found.
 | `probes.textPatterns` | `[]` | leaked-markup patterns; see presets |
 | `probes.textSkipSelector` | `''` | subtree the text scan ignores; prunes through a shadow host |
 | `probes.maxTextHits` | `25` | per-route hit cap; exhausting it is reported |
+| `probes.deadControls` | `false` | report controls whose clicks change nothing at all; see below |
+| `probes.deadControlMinObservations` | `2` | a control must be inert this many times before it is named |
+| `probes.deadControlBaselineWindows` | `4` | samples the settle window is split into to learn idle DOM churn |
+| `probes.deadControlMaxSignatures` | `200` | distinct changed subtrees tracked per window; past it the route is UNKNOWN |
+| `probes.deadControlGraceMs` | `400` | slack after the step pause for a debounced handler's request |
+| `probes.deadControlAmbientTargets` | `3` | a URL requested under this many targets is background traffic |
+| `probes.deadControlMaxRequests` | `2000` | per-route request-log cap; past it the route is UNKNOWN |
+| `probes.deadControlObserveShadowRoots` | `false` | observe inside shadow roots without changing their `mode` |
 | `probes.custom` | `[]` | `[defineProbe({…})]` |
 | `timing.gotoWaitUntil` | `'domcontentloaded'` | **not** `networkidle` — see below; validated against Playwright's enum |
 | `timing.gotoTimeoutMs` / `.settleMs` / `.waitForTimeoutMs` | `30000` / `1500` / `8000` | navigation budget |
@@ -350,6 +358,7 @@ on every route was a no-op is exit 3, and an unflagged no-op reads as coverage.
 - **textPatterns** — markup that leaked into rendered text. Off by default,
   because "is `\frac` a defect" has no app-independent answer.
   `presets.textPatterns` ships `latexMath`, `latexCmd` and `i18nKey`.
+- **deadControls** — controls that do nothing. Off by default; see below.
 
 Only the clickable census is enter-only. Everything else runs at **both** phases
 and accumulates, because a scan `settleMs` after a `domcontentloaded` goto can be
@@ -376,6 +385,40 @@ export default defineConfig({
 
 `evaluate` is serialized into the page — it cannot close over your config. Pass
 JSON-serializable data via `arg`.
+
+### Dead controls (`probes.deadControls`, off by default)
+
+Mischief has no assertion layer, and cannot grow one: knowing that "Save" saved
+needs app semantics. So a control wired to nothing throws nothing, returns 200
+and logs nothing — it passes clean. This probe is the one signal available
+without semantics: **after that click, did anything change at all?**
+
+```js
+probes: { deadControls: true }
+```
+
+A click is judged only if it came from `randomClick`/`rapidDoubleClick` at an
+`a`/`button`/`input`/`summary` or `role="button"` target, actually landed on that
+element, and happened outside the harness's own offline, Slow-3G and rate-limit
+windows. It is **alive** if *any* of these fired: a DOM subtree changed that was
+not already changing while the page sat idle; the document was replaced; a
+`.value`/`.checked` changed; the URL changed; a non-ambient request went out
+(with `deadControlGraceMs` of slack, for debounced handlers); or a dialog, popup
+or `window.open` happened. Only a control that was inert **every** time, at least
+`deadControlMinObservations` times, is reported.
+
+Three things it will not do, by design:
+
+- It never fails a run. The finding is `low`, which cannot reach exit 1/2, and it
+  is kept out of the unverified path, so it cannot reach exit 3 either.
+- It refuses to judge a route it cannot see: any shadow root present (the
+  observer is shadow-blind unless `deadControlObserveShadowRoots` is on), a
+  crashed read, or no click on the route producing a novel change at all. Those
+  routes print *why* they were skipped rather than reading as clean.
+- It will miss dead controls that ripple, spin or otherwise animate on click —
+  component libraries do this — and it can still be wrong about a control whose
+  only effect writes a node some timer also writes. Treat it as a triage aid, not
+  a verdict. That is why it is opt-in and why it is `low`.
 
 ### Network findings and your API's origin
 

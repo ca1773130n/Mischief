@@ -41,6 +41,28 @@ function pageCell(ps, verified) {
 /** Any in-page walk hit the node budget — not just the clickable one. */
 const scanCut = (ps) => !!(ps.scanTruncated || (ps.clickable && ps.clickable.scanTruncated));
 
+/**
+ * The dead-control lines for one route, or [].
+ *
+ * A function rather than inline pushes so the LOW body and the "None." guard read
+ * the SAME predicate. markdown.mjs:219 records what happens otherwise: the perf
+ * section re-derived summarize()'s threshold instead of reading its verdict, and
+ * the human-readable source of truth was the wrong one.
+ */
+function inertLines(ps) {
+  const i = ps.inert;
+  if (!i) return [];
+  const out = i.hits.map(
+    (h) =>
+      `- ${ps.page}: ${h.count} clicks on ${h.label} produced no DOM change, no request, no URL change and no dialog ` +
+      `(${i.liveClicks} other click(s) on this route did)`,
+  );
+  // Printed even though it is not a defect: a route the probe skipped must not
+  // read as a route the probe cleared.
+  if (i.disabled) out.push(`- ${ps.page}: dead-control detection did not run — ${i.disabled}`);
+  return out;
+}
+
 /** '-' when the census never ran; a bold 0 is the finding, not a number. */
 function clickableCell(ps) {
   const c = ps.clickable;
@@ -301,6 +323,7 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
           `only the first ${config.guardrails.maxCandidates} in DOM order could ever be clicked`,
       );
     }
+    L.push(...inertLines(ps));
     if (!ps.a11y) continue;
     const a = ps.a11y;
     if (a.imgsNoAlt.count + a.unlabeledButtons.count + a.unlabeledInputs.count === 0) continue;
@@ -315,7 +338,14 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
     L.push(`- console warnings: ${tot.cwarn} total; top distinct:`);
     for (const g of groupCount(allWarns, (t) => trunc(t, 140)).slice(0, 5)) L.push(`    - ×${g.count} ${g.key}`);
   }
-  if (tot.a11y === 0 && tot.cwarn === 0 && !statsList.some((p) => p.clickable && p.clickable.capped)) L.push('None.');
+  if (
+    tot.a11y === 0 &&
+    tot.cwarn === 0 &&
+    !statsList.some((p) => p.clickable && p.clickable.capped) &&
+    !statsList.some((p) => inertLines(p).length)
+  ) {
+    L.push('None.');
+  }
   L.push('');
 
   // 4 — gates

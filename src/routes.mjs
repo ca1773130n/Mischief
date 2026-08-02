@@ -122,6 +122,43 @@ export function newRouteStats(route) {
     a11y: null,
     textHits: [],
     custom: [],
+    // Timestamped requests, for the dead-control probe's network channel only.
+    // Resolved against each click's window at ROUTE END rather than diffed around
+    // the mutator, because a debounced handler fires after the step pause has
+    // already ended. Empty unless probes.deadControls is on.
+    reqLog: [],
+    reqLogDropped: 0,
+    /**
+     * "This click changed nothing observable."
+     *
+     * A control wired to nothing raises no exception, returns 200 and logs
+     * nothing, so every other field in this bag stays empty for it. Deliberately
+     * NOT folded into noopSteps: that flag means the MUTATOR found nothing to act
+     * on, it feeds guardrails.requireEffectiveSteps, and routing this signal
+     * through it would let a noisy new probe force exit 3.
+     *
+     * `disabled` carries WHY a route was not judged, so "clean" stays
+     * distinguishable from "never looked" — the same tri-state discipline as
+     * clickable.atEnter/probeFailed above.
+     */
+    inert: {
+      checks: 0,
+      obs: [],
+      obsDropped: 0,
+      hits: [],
+      churn: [],
+      ambient: [],
+      baselineWindows: 0,
+      liveClicks: 0,
+      liveSignatures: 0,
+      roots: 1,
+      capped: false,
+      probeFailed: false,
+      unknown: false,
+      dialogs: 0,
+      popups: 0,
+      disabled: null,
+    },
     brokenImages: new Set(),
     overflow: [],
     shot: null,

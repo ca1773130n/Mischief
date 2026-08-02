@@ -1,4 +1,11 @@
-import { a11yPassInPage, brokenImagesInPage, gatherCandidatesInPage, perfInPage, textPatternsInPage } from './inpage.mjs';
+import {
+  a11yPassInPage,
+  brokenImagesInPage,
+  gatherCandidatesInPage,
+  inertProbeInPage,
+  perfInPage,
+  textPatternsInPage,
+} from './inpage.mjs';
 import { reWire, sleep } from '../util.mjs';
 
 /**
@@ -58,6 +65,33 @@ export async function collectBrokenImages(page, ps, config) {
   if (!res) return;
   for (const src of res.images) ps.brokenImages.add(src);
   if (res.truncated) ps.scanTruncated = true;
+}
+
+/**
+ * Read (and RESET) the dead-control observables. `xy` is the click point on the
+ * pre-click read, null otherwise.
+ *
+ * Returns null and sets probeFailed on ANY failure to observe — an evaluate that
+ * threw, or an init script that never ran. Same rule as collectClickable, and
+ * for a sharper reason: safeEval swallows in-page throws, and this probe's whole
+ * output is "nothing changed", so a silently-zeroed read would fabricate exactly
+ * the deadness it exists to detect.
+ */
+export async function readInert(page, ps, xy) {
+  // ci identifies WHICH candidate the click aimed at, so the probe can confirm by
+  // identity that the click landed on it rather than on whatever happened to be
+  // at those coordinates.
+  const r = await safeEval(
+    page,
+    inertProbeInPage,
+    { x: xy ? xy.x : null, y: xy ? xy.y : null, ci: xy && xy.ci != null ? xy.ci : null },
+    null,
+  );
+  if (!r || !r.installed) {
+    if (ps && ps.inert) ps.inert.probeFailed = true;
+    return null;
+  }
+  return r;
 }
 
 /**

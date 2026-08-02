@@ -1,5 +1,6 @@
 import { gatherCandidatesInPage } from '../probes/inpage.mjs';
 import { clickableArg } from '../probes/index.mjs';
+import { inertOn, markClick } from '../inert.mjs';
 import { pickFrom } from '../rng.mjs';
 import { sleep } from '../util.mjs';
 
@@ -58,6 +59,13 @@ export async function chooseClickPoint(ctx, mutatorName) {
     if (!safe.length) return null;
     pick = pickFrom(ctx.rng, safe);
   }
+  // The last thing before the caller clicks. This is the ONE funnel every click
+  // in this package passes through (randomClick, rapidDoubleClick, and the
+  // randomClick offlineMode fires internally), so the dead-control probe's
+  // "before" reading belongs here and nowhere else — log() runs after the click
+  // has resolved, by which point a synchronous handler's fetch has already gone.
+  // Draws no ctx.rng(), so recorded seeds still replay exactly.
+  if (inertOn(ctx.config)) await markClick(ctx, pick);
   return pick;
 }
 

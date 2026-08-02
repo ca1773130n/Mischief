@@ -14,6 +14,7 @@ import {
   a11yPassInPage,
   brokenImagesInPage,
   gatherCandidatesInPage,
+  inertProbeInPage,
   initScriptInPage,
   textPatternsInPage,
 } from '../src/probes/inpage.mjs';
@@ -163,6 +164,139 @@ test('in-page probes and the shadow DOM', async (t) => {
     assert.deepEqual(texts(res), ['now-visible']);
     assert.equal(res.shadow.closedSuspects, 0);
     await p2.close();
+  });
+
+  await t.test('the mutation observer is shadow-BLIND by default, which is why the route gate exists', async () => {
+    // The decisive risk for dead-control detection. A document-level
+    // MutationObserver does not cross a shadow boundary, so on a Lit/Stencil/
+    // Ionic app every working control would look dead — the same shadow-blind
+    // false verdict this file's header records for the other four probes.
+    // Measured here rather than assumed, because the route-level suppressor in
+    // src/inert.mjs is only justified if this is true.
+    const sample = async (deadControlObserveShadowRoots) => {
+      const p2 = await browser.newPage();
+      await p2.addInitScript(initScriptInPage, {
+        blockWindowOpen: false,
+        forceOpenShadowRoots: false,
+        deadControls: true,
+        deadControlMaxSignatures: 200,
+        deadControlObserveShadowRoots,
+      });
+      await p2.goto('about:blank'); // addInitScript applies to the NEXT document
+      await p2.setContent(doc(`<qa-mut></qa-mut>` + component('qa-mut', `<button ${BTN}>before</button>`)));
+      await p2.evaluate(inertProbeInPage, { x: null, y: null }); // drain the load
+      await p2.evaluate(() => {
+        document.querySelector('qa-mut').shadowRoot.querySelector('button').textContent = 'after';
+      });
+      const r = await p2.evaluate(inertProbeInPage, { x: null, y: null });
+      await p2.close();
+      return r;
+    };
+
+    const blind = await sample(false);
+    assert.equal(blind.n, 0, 'a document-level observer sees NOTHING inside a shadow root');
+    assert.equal(blind.roots, 1);
+
+    const seeing = await sample(true);
+    assert.ok(seeing.n > 0, 'the opt-in wrapper must observe the root it just handed back');
+    assert.ok(seeing.roots > 1, `the root must be counted (got ${seeing.roots})`);
+  });
+
+  await t.test('a read with no observer installed is UNKNOWN, never "nothing changed"', async () => {
+    // No init script on this page at all — the attach-mode case. A silent zero
+    // here would fabricate exactly the deadness the probe exists to detect.
+    await page.setContent(doc(`<button ${BTN}>x</button>`));
+    const r = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    assert.equal(r.installed, false);
+  });
+
+  await t.test('the hit test confirms IDENTITY, so a click on a different link is not judged', async () => {
+    // The false positive the first real-app run produced. Tag containment said
+    // "an <a> is in the chain, close enough", so a click that landed on link B
+    // counted as a hit on link A — and A, never actually touched, was accused of
+    // being dead. Identity is the only thing that separates "this control did
+    // nothing" from "we never clicked this control".
+    await page.setContent(
+      doc(`<a id="A" href="#a" style="position:fixed;left:0;top:0;width:100px;height:40px">A</a>
+           <a id="B" href="#b" style="position:fixed;left:0;top:0;width:100px;height:40px;z-index:5">B</a>`),
+    );
+    const res = await page.evaluate(gatherCandidatesInPage, arg());
+    const a = res.candidates.find((c) => c.text === 'A');
+    const b = res.candidates.find((c) => c.text === 'B');
+    assert.ok(a && b, 'fixture must offer both links');
+    assert.ok(a.ci !== b.ci, 'each candidate carries its own census index');
+
+    // B is stacked on top at the same point. Aiming at A lands on B.
+    const missed = await page.evaluate(inertProbeInPage, { x: a.x, y: a.y, ci: a.ci });
+    assert.equal(missed.hitOk, false, 'a click absorbed by another link must NOT be judged');
+    assert.ok(missed.hitPath.includes('a'), 'tag containment would have wrongly accepted this');
+
+    const landed = await page.evaluate(inertProbeInPage, { x: b.x, y: b.y, ci: b.ci });
+    assert.equal(landed.hitOk, true, 'the link actually under the point is a real hit');
+  });
+
+  await t.test('identity still holds through nested labels and shadow roots', async () => {
+    // The other direction: <button><span>Save</span></button> hits the span, and
+    // the guard must still resolve that to the button. This is the case tag
+    // EQUALITY got wrong before containment, and identity must not regress it.
+    await page.setContent(
+      doc(`<button id="b" style="position:fixed;left:0;top:0;width:200px;height:60px">
+             <span>Save</span>
+           </button>`),
+    );
+    const res = await page.evaluate(gatherCandidatesInPage, arg());
+    const btn = res.candidates.find((c) => c.tag === 'button');
+    const r = await page.evaluate(inertProbeInPage, { x: btn.x, y: btn.y, ci: btn.ci });
+    assert.equal(r.hit, 'span', 'elementFromPoint still returns the innermost node');
+    assert.equal(r.hitOk, true, 'but it resolves to the button that was chosen');
+
+    // No ci at all — an unknown, which the caller must treat as "do not judge".
+    const blind = await page.evaluate(inertProbeInPage, { x: btn.x, y: btn.y, ci: null });
+    assert.equal(blind.hitOk, null, 'no candidate index means unknown, never a silent pass');
+  });
+
+  await t.test('the hit test reports the ancestor chain, so nested labels are still judged', async () => {
+    // The blocker this replaces: `hit` alone is the INNERMOST element, so
+    // <button><span>Save</span></button> reported 'span', never matched the
+    // candidate tag 'button', and judgeStep dropped the click unjudged. That is
+    // the markup of every component library — the probe was blind on real apps
+    // while passing on flat fixtures. The chain must contain the real control.
+    await page.setContent(
+      doc(`<button id="b" style="position:fixed;left:0;top:0;width:200px;height:60px">
+             <span id="s" style="pointer-events:auto">Save</span>
+           </button>`),
+    );
+    const r = await page.evaluate(inertProbeInPage, { x: 100, y: 30 });
+    assert.equal(r.hit, 'span', 'elementFromPoint still returns the innermost element');
+    assert.ok(Array.isArray(r.hitPath), 'the chain must be reported');
+    assert.ok(r.hitPath.includes('button'), `the real control must be in the chain, got ${JSON.stringify(r.hitPath)}`);
+    assert.equal(r.hitPath[0], 'span', 'the chain starts at the hit element');
+
+    // An overlay genuinely absorbing the click yields a chain WITHOUT the
+    // candidate, which is the case the guard still has to reject.
+    await page.setContent(
+      doc(`<button id="b" style="position:fixed;left:0;top:0;width:200px;height:60px">Save</button>
+           <div id="veil" style="position:fixed;left:0;top:0;width:100%;height:100%;z-index:9"></div>`),
+    );
+    const o = await page.evaluate(inertProbeInPage, { x: 100, y: 30 });
+    assert.ok(!o.hitPath.includes('button'), `an overlay must not resolve to the button, got ${JSON.stringify(o.hitPath)}`);
+  });
+
+  await t.test('scroll and hash are observable, so anchor links are not accused', async () => {
+    // Neither raises a mutation record. Without this channel a `scrollTo` button
+    // and every in-page #anchor link change nothing the probe can see.
+    await page.setContent(doc(`<div style="height:4000px"></div><a id="a" href="#bottom">go</a>`));
+    const before = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    await page.evaluate(() => window.scrollTo(0, 1200));
+    const after = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    assert.notEqual(after.scr, before.scr, 'a scroll must change the signature');
+
+    const h0 = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    await page.evaluate(() => {
+      location.hash = '#bottom';
+    });
+    const h1 = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    assert.notEqual(h1.scr, h0.scr, 'a hash change must change the signature');
   });
 
   await t.test('an unregistered custom element is a broken bundle, not a closed root', async () => {

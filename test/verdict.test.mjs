@@ -561,6 +561,254 @@ test('runMonkey: a trailing-slash redirect is not drift, a locale prefix is', as
   }
 });
 
+// ------------------------------------------------------- dead controls (inert)
+
+// A control wired to nothing raises no exception, answers 200 and logs nothing,
+// so every other detector in this package passes it clean. The signal is absence
+// of effect, which makes it the one finding here that could plausibly fail a
+// healthy run — so its containment is tested before its detection.
+
+/** A route whose only anomaly is one control that never did anything. */
+function withInert() {
+  const one = ps('/a', { steps: 40, clickable: clicked() });
+  Object.assign(one.inert, { checks: 14, liveClicks: 10, liveSignatures: 10 });
+  one.inert.hits.push({ key: '#save', label: 'button#save "Save"', count: 4 });
+  return one;
+}
+
+test('an inert control is a LOW that no exit code and no verdict can see', () => {
+  // The single most important assertion in the feature. 'low' cannot reach
+  // critCount/highCount, and unverifiedReasons is the ONLY other route to a
+  // failing exit — a noisy new signal must not be able to turn a healthy run
+  // into exit 3, which is exactly what reporting it via log(…, {noop:true})
+  // would have done.
+  const list = [withInert()];
+  const s = summarize(list, state(), cfg());
+  const f = s.findings.find((x) => x.kind === 'inert-control');
+  assert.equal(f.severity, 'low');
+  assert.match(f.message, /4 clicks on button#save "Save"/);
+  assert.match(f.message, /10 other click\(s\) on this route did/);
+  assert.equal(s.tot.inert, 1);
+  assert.equal(s.critCount, 0);
+  assert.equal(s.highCount, 0);
+  assert.equal(exitCodeFor({ verified: true, fatal: null, critCount: s.critCount, highCount: s.highCount }), EXIT.CLEAN);
+  assert.equal(unverifiedReasons(list, s, cfg(), state()).length, 0);
+});
+
+test('a route the probe could not judge says so, instead of reading as cleared', () => {
+  // "Clean" and "never looked" must stay distinguishable — the same tri-state
+  // discipline as clickable.atEnter.
+  const one = ps('/a', { steps: 40, clickable: clicked() });
+  one.inert.disabled = 'open shadow root(s) are present';
+  const s = summarize([one], state(), cfg());
+  const f = s.findings.find((x) => x.kind === 'inert-not-checked');
+  assert.equal(f.severity, 'low');
+  assert.match(f.message, /did not run on this route/);
+  assert.equal(s.tot.inert, 0, 'a route that was not judged accuses nothing');
+});
+
+/** One monkey run over an inline page, with the dead-control probe on. */
+async function inertRun(body, over = {}) {
+  const server = http.createServer((req, res) => {
+    const u = req.url.split('?')[0];
+    if (u === '/poll' || u === '/save') return void res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+    res.writeHead(200, { 'content-type': 'text/html' }).end(body);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wqk-inert-'));
+  try {
+    const result = await runMonkey(
+      resolveConfig({
+        baseUrl: `http://127.0.0.1:${server.address().port}`,
+        routes: ['/'],
+        seed: 7,
+        quiet: true,
+        mutators: { enabled: ['randomClick'] },
+        probes: { a11y: false, brokenImages: false, overflow: false, perf: false, deadControls: true },
+        // stepPauseMinMs IS the settle window the verdict is read after; 0 would
+        // judge a page that has not been given a tick to respond.
+        timing: { stepPauseMinMs: 120, stepPauseJitterMs: 0 },
+        report: { outDir, formats: ['markdown'], pageScreenshots: false },
+        ...over,
+      }),
+      { onLog: () => {} },
+    );
+    return {
+      result,
+      inert: result.statsList[0].inert,
+      accused: result.findings.filter((f) => f.kind === 'inert-control').map((f) => f.message).join('\n'),
+      md: fs.readFileSync(result.reportPaths.find((p) => p.endsWith('.md')), 'utf8'),
+    };
+  } finally {
+    server.close();
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+}
+
+test('runMonkey: each channel is a VETO — a control alive in only one of them is spared', async (t) => {
+  // The lock on the union. This page has NO background churn, so every verdict is
+  // deterministic and each control is alive through exactly one channel:
+  //   #domOnly   — DOM mutation only, and the liveness gate's proof the observer
+  //                works here at all
+  //   #fetchOnly — a request and nothing else, invisible to the DOM channel
+  //   #checkOnly — writes .checked and NOTHING else. A MutationObserver cannot
+  //                see a property write at all, so this is the one control the
+  //                DOM channel is structurally blind to
+  //   #selNative — a <select>, which produces zero DOM change, zero requests and
+  //                no URL change on every rep; it is spared by the tag whitelist
+  //                alone, and without that line it is the loudest finding on a
+  //                perfectly healthy app
+  // Delete the network veto and #fetchOnly is accused; delete the form-state
+  // channel and #checkOnly is; delete the tag whitelist and #selNative is. Only
+  // #deadOnly may ever be named.
+  const browser = await browserOrNull();
+  if (!browser) return t.skip('no Chrome/Edge available — playwright-core ships no browsers');
+  await browser.close();
+
+  const { inert, accused, result } = await inertRun(
+    `<!doctype html><meta charset=utf-8><body style="margin:0">
+      <style>button{width:110px;height:26px}</style><div id=out></div>
+      <button id=domOnly>Dom</button>
+      <button id=fetchOnly>Fetch</button>
+      <button id=deadOnly>Dead</button>
+      <!-- tabindex only so the default clickableSelector offers it a click. -->
+      <input type=checkbox id=checkOnly tabindex=0 style="width:24px;height:24px">
+      <select id=selNative><option>a</option><option>b</option></select>
+      <script>
+        domOnly.onclick = () => { const d = document.createElement('div'); d.textContent = 'x'; out.appendChild(d); };
+        fetchOnly.onclick = () => { fetch('/save', { method: 'POST' }); };
+        deadOnly.onclick = () => {};
+      </script></body>`,
+    { steps: 40 },
+  );
+
+  assert.equal(inert.disabled, null, `the route must be judged, not skipped: ${inert.disabled}`);
+  assert.match(accused, /#deadOnly/, 'the control wired to nothing must be named');
+  assert.ok(!accused.includes('#fetchOnly'), `a request is proof of life — the network veto is gone:\n${accused}`);
+  assert.ok(!accused.includes('#checkOnly'), `.checked changed, which no MutationObserver can see:\n${accused}`);
+  assert.ok(!accused.includes('#selNative'), `native select chrome changes nothing observable:\n${accused}`);
+  assert.ok(!accused.includes('#domOnly'), accused);
+  assert.equal(result.exitCode, EXIT.CLEAN);
+});
+
+test('runMonkey: a shadow-DOM route refuses to accuse anything, and says why', async (t) => {
+  // The gate that is NOT redundant with the liveness gate, measured: a route
+  // holding both a light-DOM control and a shadow control passes the liveness
+  // gate on the former and then falsely accuses the latter. Since the observer is
+  // shadow-blind by default (see test/inpage.browser.test.mjs), the only honest
+  // answer for such a route is to judge nothing at all — and to say so, because
+  // "clean" and "never looked" must stay distinguishable.
+  const browser = await browserOrNull();
+  if (!browser) return t.skip('no Chrome/Edge available — playwright-core ships no browsers');
+  await browser.close();
+
+  const { inert, accused, result } = await inertRun(
+    `<!doctype html><meta charset=utf-8><body style="margin:0">
+      <style>button{width:110px;height:26px}</style><div id=out></div>
+      <button id=lightLive>Light</button><qa-panel></qa-panel>
+      <script>
+        lightLive.onclick = () => { out.appendChild(document.createElement('div')); };
+        customElements.define('qa-panel', class extends HTMLElement {
+          constructor() {
+            super();
+            const r = this.attachShadow({ mode: 'open' });
+            r.innerHTML = '<button style="width:110px;height:26px">Shadow</button><span></span>';
+            r.querySelector('button').onclick = () => { r.querySelector('span').textContent = 'worked ' + Date.now(); };
+          }
+        });
+      </script></body>`,
+    { steps: 16 },
+  );
+
+  assert.match(inert.disabled || '', /shadow root/, 'the route must disable itself, not guess');
+  assert.match(inert.disabled, /deadControlObserveShadowRoots/, 'and must name the flag that would help');
+  assert.equal(accused, '', 'a blind route accuses nothing');
+  assert.ok(
+    result.findings.some((f) => f.kind === 'inert-not-checked'),
+    'the report must still say the probe did not run here',
+  );
+  assert.equal(result.exitCode, EXIT.CLEAN);
+});
+
+test('runMonkey: a control wired to nothing is named, and working ones are left alone', async (t) => {
+  // The measured confusion matrix, frozen. This page is deliberately adversarial:
+  // a 100ms text clock, a 500ms innerHTML re-render, a CSS animation and an 800ms
+  // poll. Measured on it, EVERY single-channel design was unusable — mutation
+  // novelty alone accused 3 of 6 healthy controls, a state signature 5, and
+  // network+URL 5. Only the union of all three, with the idle churn subtracted
+  // and a tag whitelist, gets the healthy ones back while still catching #dead
+  // through all that noise. Remove the network veto and #liveFetch is accused;
+  // remove the tag whitelist and the <select> is; remove the churn baseline and
+  // nothing is ever accused at all.
+  const browser = await browserOrNull();
+  if (!browser) return t.skip('no Chrome/Edge available — playwright-core ships no browsers');
+  await browser.close();
+
+  const { inert, accused, result, md } = await inertRun(
+    `<!doctype html><meta charset=utf-8><body style="margin:0">
+    <style>@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+      .sp{width:20px;height:20px;background:#333;animation:spin 1s linear infinite}
+      #modal{display:none}#modal.on{display:block}
+      button{width:110px;height:26px}</style>
+    <h1 id=clock>clock</h1><div class=sp></div><ul id=feed></ul>
+    <div id=out></div><div id=modal>MODAL</div>
+    <button id=dead>Dead</button>
+    <button id=deadRipple>DeadRipple</button>
+    <button id=liveDom>LiveDom</button>
+    <button id=liveFetch>LiveFetch</button>
+    <button id=liveToggle>LiveToggle</button>
+    <button id=liveSelf>LiveSelf</button>
+    <select id=sel><option>a</option><option>b</option></select>
+    <script>
+      setInterval(() => { clock.textContent = 't ' + Date.now(); }, 100);
+      setInterval(() => { feed.innerHTML = '<li>' + Math.random() + '</li><li>x</li>'; }, 500);
+      setInterval(() => { fetch('/poll?t=' + Date.now()); }, 800);
+      dead.onclick = () => {};
+      // A component-library ripple: it DOES mutate, so the union rescues it and
+      // this control is a known false NEGATIVE. Present so the fixture keeps
+      // reproducing that, unasserted because the detector does not catch it.
+      deadRipple.onclick = (e) => {
+        const s = document.createElement('span');
+        deadRipple.appendChild(s);
+        setTimeout(() => s.remove(), 300);
+      };
+      liveDom.onclick = () => { const d = document.createElement('div'); d.textContent = 'added'; out.appendChild(d); };
+      liveFetch.onclick = () => { fetch('/save', { method: 'POST' }); };
+      liveToggle.onclick = () => { modal.classList.toggle('on'); };
+      liveSelf.onclick = () => { liveSelf.textContent = 'Saved'; };
+    </script></body>`,
+    { steps: 60 },
+  );
+
+  assert.equal(inert.disabled, null, `the route must be judged, not skipped: ${inert.disabled}`);
+  assert.ok(inert.checks >= 10, `too few judged clicks to conclude anything (${inert.checks})`);
+  // The load-bearing subtraction: without it the clock's every tick is a novel
+  // change, every click reads alive, and the detector never fires at all.
+  assert.ok(
+    inert.churn.some((s) => s.includes('#clock')) && inert.churn.some((s) => s.includes('#feed')),
+    `the idle clock and re-render must both be baselined as churn — got ${JSON.stringify(inert.churn)}`,
+  );
+
+  assert.match(accused, /#dead\b/, 'the genuinely dead control must be named through all that churn');
+  for (const ok of ['#liveDom', '#liveFetch', '#liveToggle', '#liveSelf', '#sel', 'select']) {
+    assert.ok(!accused.includes(ok), `${ok} works and must not be accused — got:\n${accused}`);
+  }
+  // #deadRipple is deliberately unasserted: its component-library ripple really
+  // does mutate the DOM, so the union spares it. A known false NEGATIVE, kept in
+  // the fixture so it keeps being reproducible rather than forgotten.
+
+  // A noisy signal that could fail a run is worse than no signal at all.
+  assert.equal(result.summary.highCount, 0);
+  assert.equal(result.summary.critCount, 0);
+  assert.equal(result.exitCode, EXIT.CLEAN);
+  assert.equal(result.verified, true);
+  assert.deepEqual(unverifiedReasons(result.statsList, result.summary, result.config, result.state), []);
+
+  const low = md.slice(md.indexOf('### LOW'), md.indexOf('## Gates hit'));
+  assert.match(low, /clicks on button#dead "Dead" produced no DOM change/);
+  assert.ok(!low.includes('None.'), 'a LOW section that lists a finding and then says "None." is its own small lie');
+});
+
 // ------------------------------------------- self-inflicted perf (harness, not app)
 
 // A real run reported "LCP 29.4s > 4.0s" as a MEDIUM app finding on a route whose

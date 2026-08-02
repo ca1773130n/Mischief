@@ -167,6 +167,52 @@ export const DEFAULT_CONFIG = {
     // it used to be a hardcoded 25 that abandoned the walk with no flag, which is
     // the same silent-truncation false negative maxScanNodes exists to refuse.
     maxTextHits: 25,
+    // Dead-control detection: after a click, did ANYTHING change?
+    //
+    // A control wired to nothing raises no exception, returns 200 and logs
+    // nothing, so every other detector in this package passes it clean — a
+    // common real bug that is invisible here by construction. Absence of effect
+    // is the only signal available without app semantics.
+    //
+    // OPT-IN, following the probes.textPatterns precedent, because it is the
+    // easiest signal here to get wrong in both directions and both were
+    // measured: on an adversarial page (100ms text clock + 500ms innerHTML
+    // re-render + CSS animation + 800ms poll) each single observable accused 3-5
+    // of 6 HEALTHY controls, while a naive record count could not separate a
+    // real click from an idle tick at all. Only the union of every observable,
+    // with an idle baseline subtracted, got that down to one. See src/inert.mjs.
+    deadControls: false,
+    // A control must be clicked this many times and be inert EVERY time. One
+    // alive observation clears it permanently, run-wide.
+    deadControlMinObservations: 2,
+    // The per-route settle window is split into this many samples to learn which
+    // DOM subtrees change on their own. A signature must recur in >= 2 windows to
+    // count as churn: a BIGGER baseline means MORE dead verdicts, so the rule is
+    // deliberately biased toward a small one.
+    deadControlBaselineWindows: 6,
+    // Total idle observation per route, split across the windows above. Must be
+    // long enough to see an ordinary 0.5-3s poll at least once, or that poll is
+    // never learned as ambient and rescues dead controls for the rest of the walk.
+    deadControlBaselineMs: 4000,
+    deadControlMaxSignatures: 200,
+    // Debounced and animated handlers routinely fire their request 300-500ms
+    // after the click, i.e. after the step pause has already ended. Without the
+    // grace the request is credited to the NEXT step, which is two wrong answers
+    // from one click.
+    deadControlGraceMs: 400,
+    // A URL requested under this many DISTINCT click targets is the app's own
+    // background traffic (polling, analytics, prefetch), not any one control's
+    // effect, so it stops rescuing controls from an inert verdict.
+    deadControlAmbientTargets: 3,
+    // Bound on the per-route request log the network channel reads. Cap, then
+    // COUNT — a route past the cap is UNKNOWN and reports nothing, because a
+    // request that was never recorded cannot prove a control live.
+    deadControlMaxRequests: 2000,
+    // Observe inside shadow roots by wrapping attachShadow. Off by default like
+    // guardrails.forceOpenShadowRoots, but milder: it never alters init.mode, so
+    // the app under test keeps the roots it shipped. Without it, a route with any
+    // shadow root is skipped entirely rather than judged blind.
+    deadControlObserveShadowRoots: false,
     custom: [],
   },
 
