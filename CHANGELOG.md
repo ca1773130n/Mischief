@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.0
+
+**New: an opt-in probe for controls wired to nothing.** `probes.deadControls`
+reports a control that produced no observable effect — no novel DOM mutation
+against a per-route idle-churn baseline, no request, and no URL, scroll, hash,
+dialog or form-state change. It is the one class of bug a monkey with no oracle
+can reach: a button wired to nothing throws nothing, returns 200, logs nothing,
+and passes every other detector here.
+
+**Default OFF, and its false-positive rate against real applications is
+unmeasured.** The finding is `low` and `critCount`/`highCount` read only
+`critical`/`high`, so it is structurally incapable of moving an exit code.
+Nothing changes for anyone who does not opt in. Turn it on as a triage aid, not
+as a gate.
+
+Three things it does to avoid crying wolf, each of which cost a wrong answer to
+learn:
+
+- **A per-route idle baseline.** Anything that moved while nobody was clicking is
+  ambient by construction. Sharing `timing.settleMs` gave 375ms windows, which
+  can only learn a timer faster than that — an ordinary 0.5-3s poll was never
+  baselined and rescued dead controls for the rest of the walk.
+  `probes.deadControlBaselineMs` is now its own knob.
+- **The click must be confirmed to have landed, by identity.** Comparing the
+  hit-tested tag dropped every `<button><span>Save</span></button>`; comparing
+  the ancestor chain by tag accepted a click absorbed by a *different* link and
+  accused a control the monkey never touched. The census now parks its chosen
+  elements on the page so the probe compares the exact node.
+- **Anything short of a confirmed hit is not judged at all.** A miss, a stale
+  census, a probe that could not read the page — all mean we do not know what was
+  clicked, and a signal whose whole value is trustworthiness must not accuse on a
+  maybe.
+
+New keys under `probes`: `deadControls`, `deadControlBaselineMs`,
+`deadControlBaselineWindows`, `deadControlMinObservations`,
+`deadControlMaxSignatures`, `deadControlGraceMs`, `deadControlAmbientTargets`,
+`deadControlMaxRequests`, `deadControlObserveShadowRoots`. New finding kind:
+`inert-control`.
+
+Also: the publish workflow's actions run on the Node 24 runtime.
+
 ## 0.1.3
 
 Two fixes found by pointing mischief at a code-split Vue SPA. Both are cases
