@@ -94,6 +94,42 @@ test('a skipped route gets the finding it never had, at a severity that cannot m
   assert.equal(s.highCount, 0);
 });
 
+test('an exception thrown while WE held the connection offline is not a critical', () => {
+  // Found running mischief against a code-split Vue SPA: every offline window
+  // failed a lazy route chunk, so 7 of 8 "criticals" were the offlineMode
+  // mutator's own doing. `duringOffline` was already recorded on the record and
+  // rendered in the markdown — it just never reached severity or critCount.
+  const one = ps('/a', {
+    steps: 12,
+    clickable: clicked(),
+    jsExceptions: [
+      { message: 'Failed to fetch dynamically imported module: /src/views/Help.vue', duringOffline: true, action: 'offlineMode -' },
+      { message: 'TypeError: cannot read properties of undefined', duringOffline: false, action: 'randomClick Save' },
+    ],
+  });
+  const s = summarize([one], state(), cfg());
+  const hits = s.findings.filter((f) => f.kind === 'js-exception');
+  assert.equal(hits.length, 2, 'both are still reported');
+  assert.equal(hits.filter((f) => f.severity === 'critical').length, 1);
+  assert.equal(hits.filter((f) => f.severity === 'low').length, 1);
+  assert.match(hits.find((f) => f.severity === 'low').message, /held the connection offline/);
+  // The count has to move with the severity, or the headline and the list disagree.
+  assert.equal(s.critCount, 1);
+  assert.equal(s.tot.jsExc, 1);
+  assert.equal(s.tot.jsExcOffline, 1);
+});
+
+test('an offline-only exception cannot on its own make the run exit CRITICAL', () => {
+  const one = ps('/a', {
+    steps: 12,
+    clickable: clicked(),
+    jsExceptions: [{ message: 'chunk load failed', duringOffline: true, action: 'offlineMode -' }],
+  });
+  const s = summarize([one], state(), cfg());
+  assert.equal(s.critCount, 0);
+  assert.equal(exitCodeFor({ verified: true, fatal: null, critCount: s.critCount, highCount: s.highCount }), EXIT.CLEAN);
+});
+
 test('zero clickable candidates is a finding about the RUN, not a HIGH about the app', () => {
   const one = ps('/a', {
     steps: 40,

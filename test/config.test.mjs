@@ -80,6 +80,27 @@ test('a RegExp survives the merge instead of being flattened into an object', ()
   assert.equal(cfg.guardrails.ignoreAttribute, 'data-qa-ignore'); // sibling default kept
 });
 
+test('consoleIgnore strings are refused at load, not thrown from a page handler', () => {
+  // A plain string reaches collect.mjs's `re.test(text)` and throws from inside
+  // a page 'console' handler — uncaught, so the run dies on whatever route it
+  // first hits, writes no log.json, and exits 1, which is indistinguishable
+  // from real HIGH findings. The mistake is natural because
+  // presets.consoleIgnore is keyed by framework name.
+  const base = { baseUrl: 'http://localhost:3000' };
+  assert.throws(
+    () => resolveConfig({ ...base, network: { consoleIgnore: ['vite', 'vue'] } }),
+    /must be RegExp/,
+  );
+  assert.throws(
+    () => resolveConfig({ ...base, network: { consoleIgnore: [/ok/, null] } }),
+    /must be RegExp/,
+  );
+  // The legitimate shapes still resolve.
+  assert.ok(resolveConfig({ ...base, network: { consoleIgnore: [/\[vite\] connect/] } }));
+  assert.ok(resolveConfig({ ...base, network: { consoleIgnore: [] } }));
+  assert.ok(resolveConfig(base));
+});
+
 test('auth misconfiguration is caught before a browser opens', () => {
   const base = { baseUrl: 'http://localhost:3000' };
   assert.throws(() => resolveConfig({ ...base, auth: { strategy: 'localStorage', from: 'x.json' } }), /needs auth.key/);
@@ -272,4 +293,23 @@ test('a cross-origin API is classified when watched, and ignored when not', () =
   // A CDN 500 still is not this app's bug.
   assert.equal(defaultClassifyResponse({ status: 500, url: 'https://cdn.example/x.js', watched: false }, watching), 'ignore');
   assert.throws(() => resolveConfig({ baseUrl: 'http://localhost:3000', network: { watchOrigins: ['not a url'] } }), /not a URL/);
+});
+
+test('a consoleIgnore that is not an array is a ConfigError, not a raw TypeError', () => {
+  // `|| []` only guards FALSY values. A bare RegExp — the array simply forgotten,
+  // which is the most natural version of this mistake — is truthy and not
+  // iterable, so the for...of threw TypeError before the instanceof check ran.
+  // bin/mischief.mjs prints e.stack for anything that is not a ConfigError, so
+  // the one misconfiguration this validation exists to explain got a stack trace.
+  const base = { baseUrl: 'http://localhost:3000' };
+  for (const bad of [/vite/, { 0: /vite/ }, 'vite', 42, true]) {
+    assert.throws(
+      () => resolveConfig({ ...base, network: { consoleIgnore: bad } }),
+      (e) => e instanceof ConfigError && /consoleIgnore must be an array/.test(e.message),
+      `consoleIgnore: ${String(bad)} must fail as a ConfigError`,
+    );
+  }
+  // null/undefined still mean "unset", and arrays still take the per-entry path.
+  assert.ok(resolveConfig({ ...base, network: { consoleIgnore: null } }));
+  assert.throws(() => resolveConfig({ ...base, network: { consoleIgnore: ['vite'] } }), /must be RegExp/);
 });

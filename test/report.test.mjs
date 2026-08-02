@@ -379,3 +379,54 @@ test('a throttled perf sample renders under LOW with its reason, never MEDIUM', 
   assert.match(cut(honest.md).medium, /LCP 29\.4s/);
   assert.doesNotMatch(cut(honest.md).low, /LCP 29\.4s/);
 });
+
+test('an offline-caused exception is rendered under LOW, never under a CRITICAL (0) heading', () => {
+  // summarize() demoted these and dropped them from critCount, but the renderer
+  // looped every jsExceptions entry unconditionally. The result was a report
+  // whose CRITICAL heading said 0, whose next line said "None.", and whose line
+  // after that was a full exception write-up. The headline and the body
+  // contradicting each other on one page is exactly the false verdict this
+  // package exists to refuse.
+  const { md, summary } = fixture({
+    ps: {
+      steps: 6,
+      jsExceptions: [
+        {
+          message: 'Failed to fetch dynamically imported module: /src/views/Help.vue',
+          stack: 'Error: chunk\n    at x (/a.js:1:1)',
+          action: 'offlineMode -',
+          tail: [],
+          shot: null,
+          duringOffline: true,
+        },
+      ],
+    },
+  });
+  assert.equal(summary.critCount, 0, 'precondition: it is not a critical any more');
+
+  const crit = md.split('### CRITICAL')[1].split('### HIGH')[0];
+  assert.match(crit, /None\./);
+  assert.ok(!crit.includes('#### JS exception'), `a demoted exception must not render under CRITICAL:\n${crit}`);
+  assert.ok(!crit.includes('Help.vue'), 'nor its message');
+
+  const low = md.split('### LOW')[1];
+  assert.match(low, /Help\.vue/, 'it must still be reported, under LOW');
+  assert.match(low, /held the connection offline/);
+});
+
+test('a real exception still renders in full under CRITICAL', () => {
+  // The other half of the guard above: the skip must key on duringOffline, not
+  // quietly swallow every exception.
+  const { md, summary } = fixture({
+    ps: {
+      steps: 6,
+      jsExceptions: [
+        { message: 'TypeError: undefined is not a function', stack: 'Error\n    at y (/b.js:2:2)', action: 'randomClick Save', tail: [], shot: null, duringOffline: false },
+      ],
+    },
+  });
+  assert.equal(summary.critCount, 1);
+  const crit = md.split('### CRITICAL')[1].split('### HIGH')[0];
+  assert.match(crit, /#### JS exception 1/);
+  assert.match(crit, /undefined is not a function/);
+});

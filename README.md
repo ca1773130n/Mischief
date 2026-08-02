@@ -637,6 +637,13 @@ critical  js-exception, http-5xx
 high      http-4xx, broken-image, overflow
 ```
 
+One exception, and it runs the other way: a `js-exception` thrown while the
+harness itself held the connection offline is rated `low`, not `critical`. A
+code-split app cannot fetch a route chunk with the network cut, so the
+`offlineMode` mutator provokes one on every offline window. Those are still
+reported — under LOW, labelled — because they describe the harness rather than
+the app, and `critical` has to keep meaning "the app is broken".
+
 None of them requires knowing what the page was *supposed* to say. So nothing here
 tells you the total is wrong, that Save didn't save, that the empty state reads
 badly, or that the wrong currency symbol is rendering. An agent gets through a
