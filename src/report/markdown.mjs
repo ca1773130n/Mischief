@@ -76,7 +76,11 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
   L.push(`- steps/page: ${config.steps}`);
   L.push(`- started: ${startDate.toISOString()} · duration: ${(durationMs / 1000).toFixed(1)}s`);
   L.push(
-    `- totals: ${tot.steps} steps · ${tot.jsExc} JS exceptions · ${tot.n5} 5xx · ${tot.n4} 4xx · ` +
+    // The offline count is shown rather than dropped: those exceptions are real
+    // events, they just say something about the harness instead of the app.
+    `- totals: ${tot.steps} steps · ${tot.jsExc} JS exceptions` +
+      `${tot.jsExcOffline ? ` (+${tot.jsExcOffline} while offline, not counted)` : ''} · ` +
+      `${tot.n5} 5xx · ${tot.n4} 4xx · ` +
       `${tot.cerr} console errors · ${tot.text} text-pattern hits · ${state.gates.length} gates · ${state.skippedDanger.length} danger-skips`,
   );
   // Header-level, not buried under MEDIUM: once the backend starts refusing load
@@ -160,8 +164,14 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
   L.push('');
   if (critCount === 0) L.push('None.');
   for (const ps of statsList) {
+    // Offline-caused exceptions are excluded HERE, not just demoted in
+    // summarize(). Leaving them in rendered `### CRITICAL (0)`, then `None.`,
+    // then a full exception write-up underneath it — the heading and the body
+    // contradicting each other on the same page. They are rendered under LOW
+    // below, the way netDegraded already routes a demoted perf sample.
     for (const [i, e] of ps.jsExceptions.entries()) {
-      L.push(`#### JS exception ${i + 1} on ${ps.page}${e.duringOffline ? ' (during offline window)' : ''}`);
+      if (e.duringOffline) continue;
+      L.push(`#### JS exception ${i + 1} on ${ps.page}`);
       L.push('');
       L.push(`> ${e.message}`);
       L.push('');
@@ -268,6 +278,15 @@ export function buildMarkdown({ config, state, statsList, summary, startDate, du
   L.push('### LOW');
   L.push('');
   for (const ps of statsList) {
+    // The demoted counterparts of the CRITICAL exceptions above, on the same
+    // principle as the throttled perf samples below: the event is real and worth
+    // seeing, it just describes the harness's own offline window rather than the
+    // app. A code-split SPA cannot fetch a route chunk with the network cut, so
+    // every offline window throws — and these used to be filed as CRITICAL.
+    for (const e of ps.jsExceptions.filter((x) => x.duringOffline)) {
+      L.push(`- JS exception on ${ps.page}: ${trunc(e.message, 160)} — thrown while the harness held the connection offline; not an app finding`);
+      L.push(`    - after action: ${e.action}`);
+    }
     // The throttled counterparts of the MEDIUM perf lines above. Kept, not
     // dropped: the measurement is real and worth seeing, it just describes the
     // harness's own slow-3G window rather than the page.

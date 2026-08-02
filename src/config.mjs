@@ -94,6 +94,36 @@ export function resolveConfig(fileConfig = {}, overrides = {}, cwd = process.cwd
     }),
   ].filter((o, i, all) => all.indexOf(o) === i);
 
+  // consoleIgnore entries are matched with `re.test(text)` in collect.mjs, so a
+  // plain string throws "re.test is not a function" from inside a page event
+  // handler — an uncaught throw that kills the run on whatever route it first
+  // hits, with no report written and node's exit 1 indistinguishable from real
+  // HIGH findings. Every other field here fails loudly at load; this one did not.
+  // The mistake is easy to make because presets.consoleIgnore is keyed by
+  // framework name, so `['vue', 'vite']` looks exactly like the right thing.
+  // Array.isArray first, not `|| []`. That only guards FALSY values, so the most
+  // natural version of the mistake — `consoleIgnore: /\[vite\] connect/`, the
+  // array simply forgotten — is truthy, not iterable, and the for...of threw a
+  // raw TypeError before the instanceof check ran. bin/mischief.mjs prints
+  // e.stack for anything that is not a ConfigError, so the one misconfiguration
+  // this block exists to explain got a stack trace instead of the explanation.
+  const ignore = cfg.network.consoleIgnore;
+  if (ignore != null && !Array.isArray(ignore)) {
+    throw new ConfigError(
+      `network.consoleIgnore must be an array of RegExp, got ${typeof ignore} (${JSON.stringify(String(ignore))}).\n` +
+        `  A single pattern still needs the array: [/\\[vite\\] connect(ed|ing)/].`,
+    );
+  }
+  for (const re of ignore || []) {
+    if (!(re instanceof RegExp)) {
+      throw new ConfigError(
+        `network.consoleIgnore entries must be RegExp, got ${typeof re} (${JSON.stringify(re)}).\n` +
+          `  Use presets.consoleIgnore: [...presets.consoleIgnore.vue, ...presets.consoleIgnore.vite]\n` +
+          `  or write your own, e.g. [/\\[vite\\] connect(ed|ing)/].`,
+      );
+    }
+  }
+
   // The safety rail. Refusing by default is the point: a chaos monkey pointed at
   // production clicks real buttons in a real session.
   if (!cfg.allowProd && !hostAllowed(url.hostname, cfg.allowedHosts)) {
