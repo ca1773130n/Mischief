@@ -33,9 +33,18 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      # v7 for both: v4 runs on the Node 20 action runtime, which GitHub has
+      # deprecated and is already force-running on Node 24 with a warning. These
+      # majors declare `using: node24` natively.
+      #
+      # Checked before bumping, because setup-node has broken publishing here
+      # before (see "Stop setup-node from silently disabling OIDC"): the breaking
+      # changes across v5/v6/v7 are all about automatic dependency caching, none
+      # touch registry-url or .npmrc. Auto-caching keys on a `packageManager`
+      # field this package does not have, so it does not engage either.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # The suite runs on node:test's --test glob, which needs >= 21, while
           # the package itself supports >= 18 (see engines).
