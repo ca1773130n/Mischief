@@ -189,7 +189,11 @@ export const DEFAULT_CONFIG = {
     // DOM subtrees change on their own. A signature must recur in >= 2 windows to
     // count as churn: a BIGGER baseline means MORE dead verdicts, so the rule is
     // deliberately biased toward a small one.
-    deadControlBaselineWindows: 4,
+    deadControlBaselineWindows: 6,
+    // Total idle observation per route, split across the windows above. Must be
+    // long enough to see an ordinary 0.5-3s poll at least once, or that poll is
+    // never learned as ambient and rescues dead controls for the rest of the walk.
+    deadControlBaselineMs: 4000,
     deadControlMaxSignatures: 200,
     // Debounced and animated handlers routinely fire their request 300-500ms
     // after the click, i.e. after the step pause has already ended. Without the

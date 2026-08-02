@@ -335,9 +335,14 @@ test('log.json records the four keys the candidate list is a function of', () =>
     // baseline rule and its grace window, so a log omitting them cannot explain
     // its own verdict.
     assert.equal(log.config.probes.deadControls, false);
-    assert.equal(log.config.probes.deadControlBaselineWindows, 4);
+    assert.equal(log.config.probes.deadControlBaselineWindows, 6);
+    // The DURATION, not just the window count. Sharing timing.settleMs gave 375ms
+    // windows, which can only learn a sub-375ms timer — an ordinary 0.5-3s poll
+    // was never baselined and rescued dead controls for the rest of the walk. A
+    // log omitting this cannot explain why a control was or was not accused.
+    assert.equal(log.config.probes.deadControlBaselineMs, 4000);
     assert.equal(log.config.probes.deadControlGraceMs, 400);
-    assert.equal(log.config.timing.settleMs, 1500, 'settleMs IS the idle baseline window');
+    assert.equal(log.config.timing.settleMs, 1500, 'settleMs is the FLOOR on the baseline, not its length');
     assert.deepEqual(log.configWarnings, ['w']);
     assert.equal(log.pages[0].clickable.atEnter, 0, 'the census must round-trip, with no Set or undefined leakage');
     assert.deepEqual(log.pages[0].clickable.shadow.hosts, ['my-btn']);

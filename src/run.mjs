@@ -191,11 +191,21 @@ export async function runMonkey(config, { onLog } = {}) {
         // reaches that; see timing.gotoWaitUntil.)
         ps.gotoNote = `goto: ${trunc(String((e && e.message) || e), 140)}`;
       }
-      // The settle doubles as the dead-control probe's idle-churn baseline: same
-      // timing.settleMs, sampled rather than slept through, so the feature adds no
-      // wall clock to a run.
-      if (inertOn(config)) await sampleBaseline(page, ps, config);
-      else await sleep(config.timing.settleMs);
+      // The settle doubles as the dead-control probe's idle-churn baseline —
+      // sampled rather than slept through, and never shorter than timing.settleMs.
+      //
+      // waitForLoadState FIRST. Sampling straight after goto measured the tail of
+      // the page load, so load traffic was learned as "ambient" (disabling the
+      // network veto for the app's own API) and load-time DOM settling was learned
+      // as idle churn (masking the very effects a click is judged by). The
+      // baseline has to model the steady state, which is the state clicks happen
+      // in. Failure is ignored for the same reason it is at every other
+      // waitForLoadState here: gotoWaitUntil is domcontentloaded on purpose and a
+      // socket-holding app never reaches 'load'.
+      if (inertOn(config)) {
+        await page.waitForLoadState('load', { timeout: config.timing.loadStateTimeoutMs }).catch(() => {});
+        await sampleBaseline(page, ps, config);
+      } else await sleep(config.timing.settleMs);
 
       // (a0) Are we even ON the app? A goto TIMEOUT leaves a loaded, usable
       // document — that is the routine case above. ERR_CONNECTION_REFUSED,

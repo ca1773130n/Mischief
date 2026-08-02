@@ -210,6 +210,50 @@ test('in-page probes and the shadow DOM', async (t) => {
     assert.equal(r.installed, false);
   });
 
+  await t.test('the hit test reports the ancestor chain, so nested labels are still judged', async () => {
+    // The blocker this replaces: `hit` alone is the INNERMOST element, so
+    // <button><span>Save</span></button> reported 'span', never matched the
+    // candidate tag 'button', and judgeStep dropped the click unjudged. That is
+    // the markup of every component library — the probe was blind on real apps
+    // while passing on flat fixtures. The chain must contain the real control.
+    await page.setContent(
+      doc(`<button id="b" style="position:fixed;left:0;top:0;width:200px;height:60px">
+             <span id="s" style="pointer-events:auto">Save</span>
+           </button>`),
+    );
+    const r = await page.evaluate(inertProbeInPage, { x: 100, y: 30 });
+    assert.equal(r.hit, 'span', 'elementFromPoint still returns the innermost element');
+    assert.ok(Array.isArray(r.hitPath), 'the chain must be reported');
+    assert.ok(r.hitPath.includes('button'), `the real control must be in the chain, got ${JSON.stringify(r.hitPath)}`);
+    assert.equal(r.hitPath[0], 'span', 'the chain starts at the hit element');
+
+    // An overlay genuinely absorbing the click yields a chain WITHOUT the
+    // candidate, which is the case the guard still has to reject.
+    await page.setContent(
+      doc(`<button id="b" style="position:fixed;left:0;top:0;width:200px;height:60px">Save</button>
+           <div id="veil" style="position:fixed;left:0;top:0;width:100%;height:100%;z-index:9"></div>`),
+    );
+    const o = await page.evaluate(inertProbeInPage, { x: 100, y: 30 });
+    assert.ok(!o.hitPath.includes('button'), `an overlay must not resolve to the button, got ${JSON.stringify(o.hitPath)}`);
+  });
+
+  await t.test('scroll and hash are observable, so anchor links are not accused', async () => {
+    // Neither raises a mutation record. Without this channel a `scrollTo` button
+    // and every in-page #anchor link change nothing the probe can see.
+    await page.setContent(doc(`<div style="height:4000px"></div><a id="a" href="#bottom">go</a>`));
+    const before = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    await page.evaluate(() => window.scrollTo(0, 1200));
+    const after = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    assert.notEqual(after.scr, before.scr, 'a scroll must change the signature');
+
+    const h0 = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    await page.evaluate(() => {
+      location.hash = '#bottom';
+    });
+    const h1 = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    assert.notEqual(h1.scr, h0.scr, 'a hash change must change the signature');
+  });
+
   await t.test('an unregistered custom element is a broken bundle, not a closed root', async () => {
     await page.setContent(doc(`<qa-never-defined><span>x</span></qa-never-defined>`));
     const res = await page.evaluate(gatherCandidatesInPage, arg());

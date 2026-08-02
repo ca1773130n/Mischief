@@ -87,8 +87,21 @@ const obsCap = (config) => Math.max(1, config.steps * 4);
 export async function sampleBaseline(page, ps, config) {
   const p = config.probes;
   const n = Math.max(1, p.deadControlBaselineWindows);
-  const each = Math.max(1, Math.round(config.timing.settleMs / n));
+  // Decoupled from timing.settleMs. Sharing it gave 4 windows of 375ms, which can
+  // only ever learn a timer faster than ~375ms — so the ordinary 0.5-3s poll was
+  // never baselined, fired inside judged windows instead, and rescued dead
+  // controls as "something changed". The probe went quiet on exactly the apps it
+  // was built for. This costs real wall clock per route, which an opt-in
+  // diagnostic can afford and a default-on one could not.
+  // Never shorter than the settle this replaces: other probes read the page after
+  // it and a shortened settle would degrade them to buy this one nothing.
+  const total = Math.max(p.deadControlBaselineMs, config.timing.settleMs);
+  const each = Math.max(1, Math.round(total / n));
   const seen = new Map();
+  // Only traffic from HERE ON is ambient. Previously the whole of ps.reqLog was,
+  // which meant every URL the page load touched disabled the network veto for
+  // itself — a control calling its own app's API was judged on DOM alone.
+  const reqFrom = ps.reqLog.length;
   await readInert(page, ps, null); // drain whatever the load itself produced
   for (let i = 0; i < n; i++) {
     await sleep(each);
@@ -99,10 +112,13 @@ export async function sampleBaseline(page, ps, config) {
     if (r.capped) ps.inert.capped = true;
     for (const s of new Set(r.sigs)) seen.set(s, (seen.get(s) || 0) + 1);
   }
-  ps.inert.churn = [...seen.entries()].filter(([, c]) => c >= 2).map(([s]) => s);
+  // ONE sighting is enough. Nothing was clicked during these windows, so anything
+  // that moved is ambient by construction; requiring two was a confidence test the
+  // situation does not call for, and it is what let slow timers through.
+  ps.inert.churn = [...seen.keys()];
   // Anything the page asked for while nobody was touching it is ambient by
   // definition: polling, analytics, HMR heartbeats, route prefetch.
-  for (const r of ps.reqLog) if (!ps.inert.ambient.includes(r.u)) ps.inert.ambient.push(r.u);
+  for (const r of ps.reqLog.slice(reqFrom)) if (!ps.inert.ambient.includes(r.u)) ps.inert.ambient.push(r.u);
 }
 
 /**
@@ -172,7 +188,16 @@ export async function judgeStep(ctx, mutatorName, threw) {
   // mouse.click performs no actionability check and aims at the centre of the
   // VIEWPORT-CLIPPED rect, so a sticky header or overlay absorbs the click and the
   // element actually hit is not the one this finding would name.
-  if (pend.before.hit && pend.before.hit !== pend.tag) return;
+  // CONTAINMENT, not tag equality. The hit test returns the innermost element at
+  // the click point, which for the ordinary `<button><span>Save</span></button>`
+  // is the span. Comparing that to the candidate's tag dropped every control with
+  // nested content — i.e. essentially every component-library button — so the
+  // probe reported nothing on real apps while looking healthy on flat test
+  // fixtures. The click counts as landing on the candidate when the candidate's
+  // tag appears anywhere in the hit element's ancestor chain; a genuine overlay
+  // yields a chain that does not contain it, which is the case this guard is for.
+  const chain = pend.before.hitPath;
+  if (chain && chain.length && !chain.includes(pend.tag)) return;
   if (pend.before.hit === 'canvas' || pend.before.hit === 'iframe') return;
 
   const after = await readInert(ctx.page, ps, null);
@@ -189,6 +214,7 @@ export async function judgeStep(ctx, mutatorName, threw) {
     after.docId !== pend.before.docId || // a navigation IS the change
     after.frm !== pend.before.frm || // .value / .checked, which no observer sees
     after.opened !== pend.before.opened || // window.open, which this harness stubs
+    after.scr !== pend.before.scr || // scrollTo and #anchor links raise no mutation
     ps.inert.dialogs !== pend.dialogs ||
     ps.inert.popups !== pend.popups ||
     samePath(ctx.page.url()) !== pend.url;

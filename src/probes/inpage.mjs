@@ -657,6 +657,7 @@ export function inertProbeInPage({ x, y }) {
     }
   } catch {}
   let hit = null;
+  let hitPath = null;
   if (x != null && y != null) {
     try {
       let el = document.elementFromPoint(x, y);
@@ -666,8 +667,27 @@ export function inertProbeInPage({ x, y }) {
         el = inner;
       }
       hit = el ? el.tagName.toLowerCase() : null;
+      // The ANCESTOR CHAIN, not just the deepest tag. elementFromPoint returns
+      // the innermost element at the point, so `<button><span>Save</span></button>`
+      // hits the span — and a caller comparing that against the candidate's tag
+      // drops the click as "landed somewhere else". That is the standard markup of
+      // every component library, so tag equality made the whole probe silently
+      // blind on real apps while its own tests passed. Crossing shadow hosts too,
+      // for the same reason the descent above does.
+      hitPath = [];
+      for (let e = el, i = 0; e && i < 12; i++) {
+        hitPath.push(e.tagName.toLowerCase());
+        e = e.parentElement || (e.parentNode && e.parentNode.host) || null;
+      }
     } catch {}
   }
+  // Scroll offset and hash. Neither raises a mutation record, so without them a
+  // `scrollTo` button and every in-page `#anchor` link change nothing observable
+  // and are systematically accused.
+  let scr = '';
+  try {
+    scr = `${Math.round(window.scrollX)},${Math.round(window.scrollY)},${location.hash}`;
+  } catch {}
   const out = {
     installed: !!m,
     n: m ? m.n : 0,
@@ -678,6 +698,8 @@ export function inertProbeInPage({ x, y }) {
     frm: hash(frm),
     opened: window.__qaOpenBlocked || 0,
     hit,
+    hitPath,
+    scr,
   };
   if (m) {
     m.n = 0;
