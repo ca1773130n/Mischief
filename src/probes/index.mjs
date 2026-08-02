@@ -78,7 +78,15 @@ export async function collectBrokenImages(page, ps, config) {
  * the deadness it exists to detect.
  */
 export async function readInert(page, ps, xy) {
-  const r = await safeEval(page, inertProbeInPage, { x: xy ? xy.x : null, y: xy ? xy.y : null }, null);
+  // ci identifies WHICH candidate the click aimed at, so the probe can confirm by
+  // identity that the click landed on it rather than on whatever happened to be
+  // at those coordinates.
+  const r = await safeEval(
+    page,
+    inertProbeInPage,
+    { x: xy ? xy.x : null, y: xy ? xy.y : null, ci: xy && xy.ci != null ? xy.ci : null },
+    null,
+  );
   if (!r || !r.installed) {
     if (ps && ps.inert) ps.inert.probeFailed = true;
     return null;

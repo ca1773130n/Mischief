@@ -139,7 +139,7 @@ export async function markClick(ctx, pick) {
   // Short-circuit before the round trip: a <select> or a [tabindex] div is never
   // judged, so reading the page for it is a CDP call per click for nothing.
   if (!eligibleTarget(pick)) return;
-  const before = await readInert(ctx.page, ps, { x: pick.x, y: pick.y });
+  const before = await readInert(ctx.page, ps, { x: pick.x, y: pick.y, ci: pick.ci });
   if (!before) return;
   st.pendingClick = {
     t: Date.now(),
@@ -188,16 +188,22 @@ export async function judgeStep(ctx, mutatorName, threw) {
   // mouse.click performs no actionability check and aims at the centre of the
   // VIEWPORT-CLIPPED rect, so a sticky header or overlay absorbs the click and the
   // element actually hit is not the one this finding would name.
-  // CONTAINMENT, not tag equality. The hit test returns the innermost element at
-  // the click point, which for the ordinary `<button><span>Save</span></button>`
-  // is the span. Comparing that to the candidate's tag dropped every control with
-  // nested content — i.e. essentially every component-library button — so the
-  // probe reported nothing on real apps while looking healthy on flat test
-  // fixtures. The click counts as landing on the candidate when the candidate's
-  // tag appears anywhere in the hit element's ancestor chain; a genuine overlay
-  // yields a chain that does not contain it, which is the case this guard is for.
-  const chain = pend.before.hitPath;
-  if (chain && chain.length && !chain.includes(pend.tag)) return;
+  // IDENTITY, and it must be a positive confirmation.
+  //
+  // Two earlier versions of this guard were both wrong. Tag EQUALITY against the
+  // innermost hit element dropped every `<button><span>Save</span></button>` —
+  // the markup of every component library — so the probe was blind on real apps.
+  // Tag CONTAINMENT over the ancestor chain fixed that and broke the other way:
+  // any ancestor <a> satisfied it, so a click that landed on a DIFFERENT link
+  // counted as a hit on the intended one, and a control the monkey never touched
+  // was accused of being dead. That produced the only false positive the first
+  // real-app run found.
+  //
+  // hitOk compares the exact node the census chose. Anything other than a
+  // confirmed true — a miss, a stale census, a probe that could not tell — means
+  // we do not know what was clicked, and a signal whose entire value is
+  // trustworthiness must not accuse on a maybe.
+  if (pend.before.hitOk !== true) return;
   if (pend.before.hit === 'canvas' || pend.before.hit === 'iframe') return;
 
   const after = await readInert(ctx.page, ps, null);

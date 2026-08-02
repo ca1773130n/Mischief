@@ -127,6 +127,7 @@ export function gatherCandidatesInPage({ selector, dangerSource, dangerFlags, ig
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const out = [];
+  const els = [];
   const scan = qaWalk(document.documentElement, { pruneAttribute: ignoreAttribute, maxNodes: maxScanNodes }, (el) => {
     if (out.length >= maxCandidates) return false;
     // A user-supplied clickableSelector that does not parse must not take the
@@ -153,7 +154,14 @@ export function gatherCandidatesInPage({ selector, dangerSource, dangerFlags, ig
     const label = ((el.innerText || el.value || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || ''))
       .replace(/\s+/g, ' ')
       .trim();
+    // The element itself, parked on the page so a LATER evaluate can ask "did the
+    // click actually land on this control?" by identity. Not a data attribute:
+    // stamping one would be a DOM mutation, and the dead-control probe reads DOM
+    // mutations as evidence a control did something — the instrument would create
+    // its own signal.
+    els.push(el);
     out.push({
+      ci: els.length - 1,
       x: Math.round((L + R) / 2),
       y: Math.round((T + B) / 2),
       tag: el.tagName.toLowerCase(),
@@ -169,6 +177,10 @@ export function gatherCandidatesInPage({ selector, dangerSource, dangerFlags, ig
       role: el.getAttribute('role') || '',
     });
   });
+  // Survives until the next census or the next document. A stale array is not a
+  // hazard: the reader compares by identity, and an element from a previous page
+  // can never equal one hit-tested on this one.
+  window.__qaCandEls = els;
   return {
     candidates: out,
     selector: sel,
@@ -636,7 +648,7 @@ export function perfInPage() {
  * host: on a component app the host's tag never equals the candidate's, so every
  * click would be dropped as "landed somewhere else".
  */
-export function inertProbeInPage({ x, y }) {
+export function inertProbeInPage({ x, y, ci }) {
   const m = window.__qaMut;
   const hash = (s) => {
     let h = 2166136261;
@@ -658,6 +670,7 @@ export function inertProbeInPage({ x, y }) {
   } catch {}
   let hit = null;
   let hitPath = null;
+  let hitOk = null;
   if (x != null && y != null) {
     try {
       let el = document.elementFromPoint(x, y);
@@ -667,17 +680,35 @@ export function inertProbeInPage({ x, y }) {
         el = inner;
       }
       hit = el ? el.tagName.toLowerCase() : null;
-      // The ANCESTOR CHAIN, not just the deepest tag. elementFromPoint returns
-      // the innermost element at the point, so `<button><span>Save</span></button>`
-      // hits the span — and a caller comparing that against the candidate's tag
-      // drops the click as "landed somewhere else". That is the standard markup of
-      // every component library, so tag equality made the whole probe silently
-      // blind on real apps while its own tests passed. Crossing shadow hosts too,
-      // for the same reason the descent above does.
+      // IDENTITY, not tag. elementFromPoint returns the innermost element, so
+      // `<button><span>Save</span></button>` hits the span and a tag comparison
+      // against 'button' drops every component-library control. Walking the chain
+      // and matching on TAG fixed that but bought a worse blindness: any ancestor
+      // <a> satisfies `chain.includes('a')`, so a click that landed on a
+      // DIFFERENT link read as a hit on the intended one — and a control the
+      // monkey never actually touched got accused of being dead.
+      //
+      // ci indexes the census's own element array, so this compares the exact
+      // node that was chosen. hitOk === false means the click provably missed and
+      // the caller must not judge it; null means we could not tell, which the
+      // caller also treats as "do not judge".
       hitPath = [];
       for (let e = el, i = 0; e && i < 12; i++) {
         hitPath.push(e.tagName.toLowerCase());
         e = e.parentElement || (e.parentNode && e.parentNode.host) || null;
+      }
+      const cand = ci == null ? null : (window.__qaCandEls || [])[ci];
+      if (cand) {
+        hitOk = false;
+        // Crossing shadow hosts, for the same reason the descent above does:
+        // Node.contains() stops at a shadow boundary.
+        for (let e = el, i = 0; e && i < 12; i++) {
+          if (e === cand) {
+            hitOk = true;
+            break;
+          }
+          e = e.parentElement || (e.parentNode && e.parentNode.host) || null;
+        }
       }
     } catch {}
   }
@@ -699,6 +730,7 @@ export function inertProbeInPage({ x, y }) {
     opened: window.__qaOpenBlocked || 0,
     hit,
     hitPath,
+    hitOk,
     scr,
   };
   if (m) {

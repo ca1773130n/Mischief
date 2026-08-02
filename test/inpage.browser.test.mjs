@@ -210,6 +210,51 @@ test('in-page probes and the shadow DOM', async (t) => {
     assert.equal(r.installed, false);
   });
 
+  await t.test('the hit test confirms IDENTITY, so a click on a different link is not judged', async () => {
+    // The false positive the first real-app run produced. Tag containment said
+    // "an <a> is in the chain, close enough", so a click that landed on link B
+    // counted as a hit on link A — and A, never actually touched, was accused of
+    // being dead. Identity is the only thing that separates "this control did
+    // nothing" from "we never clicked this control".
+    await page.setContent(
+      doc(`<a id="A" href="#a" style="position:fixed;left:0;top:0;width:100px;height:40px">A</a>
+           <a id="B" href="#b" style="position:fixed;left:0;top:0;width:100px;height:40px;z-index:5">B</a>`),
+    );
+    const res = await page.evaluate(gatherCandidatesInPage, arg());
+    const a = res.candidates.find((c) => c.text === 'A');
+    const b = res.candidates.find((c) => c.text === 'B');
+    assert.ok(a && b, 'fixture must offer both links');
+    assert.ok(a.ci !== b.ci, 'each candidate carries its own census index');
+
+    // B is stacked on top at the same point. Aiming at A lands on B.
+    const missed = await page.evaluate(inertProbeInPage, { x: a.x, y: a.y, ci: a.ci });
+    assert.equal(missed.hitOk, false, 'a click absorbed by another link must NOT be judged');
+    assert.ok(missed.hitPath.includes('a'), 'tag containment would have wrongly accepted this');
+
+    const landed = await page.evaluate(inertProbeInPage, { x: b.x, y: b.y, ci: b.ci });
+    assert.equal(landed.hitOk, true, 'the link actually under the point is a real hit');
+  });
+
+  await t.test('identity still holds through nested labels and shadow roots', async () => {
+    // The other direction: <button><span>Save</span></button> hits the span, and
+    // the guard must still resolve that to the button. This is the case tag
+    // EQUALITY got wrong before containment, and identity must not regress it.
+    await page.setContent(
+      doc(`<button id="b" style="position:fixed;left:0;top:0;width:200px;height:60px">
+             <span>Save</span>
+           </button>`),
+    );
+    const res = await page.evaluate(gatherCandidatesInPage, arg());
+    const btn = res.candidates.find((c) => c.tag === 'button');
+    const r = await page.evaluate(inertProbeInPage, { x: btn.x, y: btn.y, ci: btn.ci });
+    assert.equal(r.hit, 'span', 'elementFromPoint still returns the innermost node');
+    assert.equal(r.hitOk, true, 'but it resolves to the button that was chosen');
+
+    // No ci at all — an unknown, which the caller must treat as "do not judge".
+    const blind = await page.evaluate(inertProbeInPage, { x: btn.x, y: btn.y, ci: null });
+    assert.equal(blind.hitOk, null, 'no candidate index means unknown, never a silent pass');
+  });
+
   await t.test('the hit test reports the ancestor chain, so nested labels are still judged', async () => {
     // The blocker this replaces: `hit` alone is the INNERMOST element, so
     // <button><span>Save</span></button> reported 'span', never matched the
