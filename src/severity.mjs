@@ -187,7 +187,7 @@ export function summarize(statsList, state, config) {
   const tot = {
     steps: 0, jsExc: 0, n4: 0, n5: 0, cerr: 0, cwarn: 0, a11y: 0, broken: 0,
     overflow: 0, text: 0, slow: 0, stepFail: 0, unreached: 0, redirected: 0, skipped: 0,
-    noClickable: 0, rateLimited: 0,
+    noClickable: 0, rateLimited: 0, inert: 0,
   };
   const findings = [];
   const add = (severity, kind, page, message, extra) => findings.push({ severity, kind, page, message, ...extra });
@@ -205,6 +205,7 @@ export function summarize(statsList, state, config) {
     tot.slow += ps.slowRequests.length;
     tot.stepFail += ps.stepFailures.length;
     tot.text += (ps.textHits || []).length;
+    tot.inert += ((ps.inert && ps.inert.hits) || []).length;
     if (ps.unreached) tot.unreached++;
     if (ps.redirectedTo) tot.redirected++;
     if (ps.skipped) tot.skipped++;
@@ -262,6 +263,27 @@ export function summarize(statsList, state, config) {
       add('medium', 'text-scan-truncated', ps.page, `the text scan stopped at probes.maxTextHits (${config.probes.maxTextHits}) — there may be more leaked markup than is listed`);
     if (ps.slowRequestsDropped)
       add('low', 'slow-requests-dropped', ps.page, `${ps.slowRequestsDropped} further slow request(s) past report.slowRequestCap (${config.report.slowRequestCap}) were counted, not stored`);
+
+    // 'low', and NEVER anything else. This is an inference from ABSENCE with a
+    // measured, non-zero false-positive rate — unlike every 'medium' beside it,
+    // which states something the harness observed directly. critCount/highCount
+    // below select on 'critical'/'high' only, so a 'low' finding is structurally
+    // incapable of moving exitCodeFor, and tot.inert is inert by construction
+    // because neither expression reads it. The nearest precedents are a11y and
+    // candidates-capped: real measurements, uncertain diagnosis, must not drive
+    // behaviour. It must also never travel via ps.textHits (defaults to 'high')
+    // or ps.custom (user-supplied severity), and never via log(…, {noop:true}),
+    // which feeds requireEffectiveSteps and would turn this into exit 3.
+    //
+    // The wording states the OBSERVATION and the evidence that the instrument
+    // works on this route — never "broken" or "dead" — so a reader can dismiss it
+    // in one glance when it is a false positive.
+    for (const h of (ps.inert && ps.inert.hits) || [])
+      add('low', 'inert-control', ps.page, `${h.count} clicks on ${h.label} produced no DOM change, no request, no URL change and no dialog (${ps.inert.liveClicks} other click(s) on this route did)`);
+    // A route that was NOT judged says so. "Clean" and "never looked" must stay
+    // distinguishable — the same rule clickable.atEnter exists for.
+    if (ps.inert && ps.inert.disabled)
+      add('low', 'inert-not-checked', ps.page, `dead-control detection did not run on this route: ${ps.inert.disabled}`);
 
     for (const t of ps.consoleErrors) add('medium', 'console-error', ps.page, trunc(t, 160));
     // A perf sample taken while the harness held the network at Slow-3G or

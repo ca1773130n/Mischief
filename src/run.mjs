@@ -5,6 +5,7 @@ import { makeRunId, pathOf, samePath, sleep, trunc, uniqueSlugs } from './util.m
 import { openBrowser, makeCleanup } from './browser/attach.mjs';
 import { wireGuardrails, restoreNetwork } from './browser/guardrails.mjs';
 import { wireCollectors } from './collect.mjs';
+import { closeRoute, inertOn, judgeStep, sampleBaseline, scoreRun } from './inert.mjs';
 import { applyAuth, verifyAuth, AuthError } from './auth/index.mjs';
 import { resolveMutators } from './mutators/index.mjs';
 import { runProbes } from './probes/index.mjs';
@@ -66,6 +67,11 @@ export async function runMonkey(config, { onLog } = {}) {
     closing: false,
     errShots: 0,
     stepDidWork: false, // see log() and the no-op accounting in the step loop
+    // The click the dead-control probe is currently judging, stamped by
+    // chooseClickPoint. Deliberately separate from stepDidWork, which is INTENT:
+    // it is true on danger-refused steps and on mutators that dispatch no click
+    // at all, so gating on it would judge steps the monkey never acted on.
+    pendingClick: null,
     actionLog: [],
     skippedDanger: [],
     gates: [],
@@ -146,6 +152,9 @@ export async function runMonkey(config, { onLog } = {}) {
     await page.addInitScript(initScriptInPage, {
       blockWindowOpen: config.guardrails.blockWindowOpen,
       forceOpenShadowRoots: config.guardrails.forceOpenShadowRoots,
+      deadControls: config.probes.deadControls,
+      deadControlMaxSignatures: config.probes.deadControlMaxSignatures,
+      deadControlObserveShadowRoots: config.probes.deadControlObserveShadowRoots,
     });
     wireGuardrails(page, state, config.baseOrigin, config);
     wireCollectors(page, state, config.baseOrigin, config);
@@ -182,7 +191,11 @@ export async function runMonkey(config, { onLog } = {}) {
         // reaches that; see timing.gotoWaitUntil.)
         ps.gotoNote = `goto: ${trunc(String((e && e.message) || e), 140)}`;
       }
-      await sleep(config.timing.settleMs);
+      // The settle doubles as the dead-control probe's idle-churn baseline: same
+      // timing.settleMs, sampled rather than slept through, so the feature adds no
+      // wall clock to a run.
+      if (inertOn(config)) await sampleBaseline(page, ps, config);
+      else await sleep(config.timing.settleMs);
 
       // (a0) Are we even ON the app? A goto TIMEOUT leaves a loaded, usable
       // document — that is the routine case above. ERR_CONNECTION_REFUSED,
@@ -277,6 +290,8 @@ export async function runMonkey(config, { onLog } = {}) {
         const name = pickWeighted(master, routeEntries);
         ctx.rng = deriveStepRng(config.seed, ri, stepN); // see rng.mjs for why
         state.stepDidWork = false;
+        state.pendingClick = null;
+        let threw = false;
         try {
           await registry[name](ctx);
           // Counted only for steps that COMPLETED: a step that threw is already a
@@ -286,6 +301,7 @@ export async function runMonkey(config, { onLog } = {}) {
         } catch (e) {
           // A step failure is a finding, never a crash. One unclickable element
           // must not cost you the other 39 steps.
+          threw = true;
           ps.stepFailures.push({ step: stepN, mutator: name, error: trunc(String((e && e.message) || e), 300) });
           log(name, '-', 'step-failed');
         }
@@ -298,6 +314,10 @@ export async function runMonkey(config, { onLog } = {}) {
             Math.floor(master() * config.timing.stepPauseJitterMs) +
             state.rateLimitPauseMs,
         );
+        // AFTER the pause, deliberately. That 150-400ms is a settle window the
+        // run already pays for; reading before it would give a zero-length window
+        // and report every asynchronous effect as absent.
+        if (inertOn(config)) await judgeStep(ctx, name, threw);
       }
 
       // Leave the next route a clean slate: unthrottled, default metrics.
@@ -313,6 +333,11 @@ export async function runMonkey(config, { onLog } = {}) {
       // that can throw, and a stuck `true` tags every later request failure as
       // self-inflicted and suppresses the findings.
       state.offlineWindow = false;
+
+      // Decide whether this route may accuse anything at all, and resolve each
+      // click's network window now that every request it could have caused has
+      // had time to be issued.
+      if (inertOn(config)) closeRoute(ps, config);
 
       await runProbes(page, ps, config, 'exit');
       if (config.report.pageScreenshots) {
@@ -354,6 +379,11 @@ export async function runMonkey(config, { onLog } = {}) {
   }
 
   function finish({ fatal: f, durationMs }) {
+    // Scored once, over every route, BEFORE summarize reads ps.inert.hits. A
+    // control clicked on three routes is one control: an identity proved live
+    // anywhere clears it everywhere, which also makes the verdict independent of
+    // the order the routes happened to run in.
+    if (inertOn(config)) scoreRun(statsList, config);
     const summary = summarize(statsList, state, config);
     // Guarded on `!== false`: abandon() and the crash handler have already set a
     // far more actionable reason, and both leave an all-zero statsList — so an
@@ -386,6 +416,10 @@ export async function runMonkey(config, { onLog } = {}) {
         redirectedTo: ps.redirectedTo,
         durationMs: ps.durationMs,
         clickable: ps.clickable,
+        // Counts, not records: a CI job needs to tell "checked N controls, none
+        // reportable" from "never looked", which is the same distinction
+        // clickable.atEnter draws. The records themselves are in log.json.
+        inert: { checks: ps.inert.checks, reported: ps.inert.hits.length, disabled: ps.inert.disabled },
       })),
       verified: state.verified !== false,
       unverifiedReason: state.unverifiedReason,

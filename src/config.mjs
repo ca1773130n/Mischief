@@ -119,6 +119,26 @@ export function resolveConfig(fileConfig = {}, overrides = {}, cwd = process.cwd
     }
   }
 
+  // Same failure mode one probe over: deadControlBaselineWindows: 0 would divide
+  // the settle window into nothing and learn an EMPTY idle baseline, after which
+  // every timer tick reads as a control's effect — or, with the comparison the
+  // other way round, every click reads as dead. A signal whose stated risk is
+  // false positives must not be silently mis-tunable.
+  for (const k of [
+    'deadControlMinObservations',
+    'deadControlBaselineWindows',
+    'deadControlMaxSignatures',
+    'deadControlAmbientTargets',
+    'deadControlMaxRequests',
+  ]) {
+    if (!Number.isFinite(cfg.probes[k]) || cfg.probes[k] < 1) {
+      throw new ConfigError(`probes.${k} must be a number >= 1 (got ${cfg.probes[k]})`);
+    }
+  }
+  if (!Number.isFinite(cfg.probes.deadControlGraceMs) || cfg.probes.deadControlGraceMs < 0) {
+    throw new ConfigError(`probes.deadControlGraceMs must be a number >= 0 (got ${cfg.probes.deadControlGraceMs})`);
+  }
+
   // Validated like browser.mode and auth.strategy, and for a sharper reason: this
   // is the most-edited timing key, it goes straight to Playwright, and a typo
   // makes EVERY page.goto reject. The run then happens entirely on about:blank and

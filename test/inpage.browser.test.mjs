@@ -14,6 +14,7 @@ import {
   a11yPassInPage,
   brokenImagesInPage,
   gatherCandidatesInPage,
+  inertProbeInPage,
   initScriptInPage,
   textPatternsInPage,
 } from '../src/probes/inpage.mjs';
@@ -163,6 +164,50 @@ test('in-page probes and the shadow DOM', async (t) => {
     assert.deepEqual(texts(res), ['now-visible']);
     assert.equal(res.shadow.closedSuspects, 0);
     await p2.close();
+  });
+
+  await t.test('the mutation observer is shadow-BLIND by default, which is why the route gate exists', async () => {
+    // The decisive risk for dead-control detection. A document-level
+    // MutationObserver does not cross a shadow boundary, so on a Lit/Stencil/
+    // Ionic app every working control would look dead — the same shadow-blind
+    // false verdict this file's header records for the other four probes.
+    // Measured here rather than assumed, because the route-level suppressor in
+    // src/inert.mjs is only justified if this is true.
+    const sample = async (deadControlObserveShadowRoots) => {
+      const p2 = await browser.newPage();
+      await p2.addInitScript(initScriptInPage, {
+        blockWindowOpen: false,
+        forceOpenShadowRoots: false,
+        deadControls: true,
+        deadControlMaxSignatures: 200,
+        deadControlObserveShadowRoots,
+      });
+      await p2.goto('about:blank'); // addInitScript applies to the NEXT document
+      await p2.setContent(doc(`<qa-mut></qa-mut>` + component('qa-mut', `<button ${BTN}>before</button>`)));
+      await p2.evaluate(inertProbeInPage, { x: null, y: null }); // drain the load
+      await p2.evaluate(() => {
+        document.querySelector('qa-mut').shadowRoot.querySelector('button').textContent = 'after';
+      });
+      const r = await p2.evaluate(inertProbeInPage, { x: null, y: null });
+      await p2.close();
+      return r;
+    };
+
+    const blind = await sample(false);
+    assert.equal(blind.n, 0, 'a document-level observer sees NOTHING inside a shadow root');
+    assert.equal(blind.roots, 1);
+
+    const seeing = await sample(true);
+    assert.ok(seeing.n > 0, 'the opt-in wrapper must observe the root it just handed back');
+    assert.ok(seeing.roots > 1, `the root must be counted (got ${seeing.roots})`);
+  });
+
+  await t.test('a read with no observer installed is UNKNOWN, never "nothing changed"', async () => {
+    // No init script on this page at all — the attach-mode case. A silent zero
+    // here would fabricate exactly the deadness the probe exists to detect.
+    await page.setContent(doc(`<button ${BTN}>x</button>`));
+    const r = await page.evaluate(inertProbeInPage, { x: null, y: null });
+    assert.equal(r.installed, false);
   });
 
   await t.test('an unregistered custom element is a broken bundle, not a closed root', async () => {

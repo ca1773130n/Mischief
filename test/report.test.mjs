@@ -277,6 +277,41 @@ test('every clickable finding summarize() files is also rendered under its sever
   assert.ok(low.includes('at least guardrails.maxCandidates (400)'));
 });
 
+test('an inert control renders under LOW, and LOW stops claiming "None."', () => {
+  // markdown.mjs already had this bug once for throttled perf lines: a section
+  // that prints a finding and then says "None." underneath it. The renderer and
+  // the "None." guard must read the SAME predicate.
+  const p = stats('/a', { steps: 40 });
+  Object.assign(p.inert, { checks: 12, liveClicks: 9, liveSignatures: 9 });
+  p.inert.hits.push({ key: '#save', label: 'button#save "Save"', count: 4 });
+  const { md, summary } = multi([p]);
+  assert.ok(summary.findings.some((f) => f.kind === 'inert-control' && f.severity === 'low'));
+  const low = md.slice(md.indexOf('### LOW'), md.indexOf('## Gates hit'));
+  assert.ok(low.includes('4 clicks on button#save "Save" produced no DOM change'), low);
+  assert.ok(low.includes('9 other click(s) on this route did'), 'the evidence that the instrument works must travel with the claim');
+  assert.ok(!low.includes('None.'));
+
+  // Nothing about a LOW finding may reach the exit code, and no heading moved.
+  assert.equal(summary.critCount, 0);
+  assert.equal(summary.highCount, 0);
+  let cursor = 0;
+  for (const marker of GOLDEN_SPINE) {
+    const at = md.indexOf(marker, cursor);
+    assert.ok(at >= 0, `missing section: ${marker}`);
+    cursor = at + marker.length;
+  }
+});
+
+test('a route the dead-control probe skipped says so rather than reading as cleared', () => {
+  const p = stats('/a', { steps: 40 });
+  p.inert.disabled = 'open shadow root(s) are present and the observer cannot see inside them';
+  const { md, summary } = multi([p]);
+  const low = md.slice(md.indexOf('### LOW'), md.indexOf('## Gates hit'));
+  assert.ok(low.includes('dead-control detection did not run — open shadow root(s) are present'), low);
+  assert.ok(!low.includes('None.'));
+  assert.equal(summary.tot.inert, 0, 'a route that was never judged accuses nothing');
+});
+
 test('log.json records the four keys the candidate list is a function of', () => {
   // A log that omitted them could not explain its own picks.
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wqk-json-'));
@@ -296,6 +331,13 @@ test('log.json records the four keys the candidate list is a function of', () =>
     assert.equal(log.config.guardrails.maxScanNodes, 20000);
     assert.equal(log.config.guardrails.requireClickable, true);
     assert.equal(log.config.guardrails.forceOpenShadowRoots, false);
+    // Same rule one probe over: an inert-control verdict is a function of its
+    // baseline rule and its grace window, so a log omitting them cannot explain
+    // its own verdict.
+    assert.equal(log.config.probes.deadControls, false);
+    assert.equal(log.config.probes.deadControlBaselineWindows, 4);
+    assert.equal(log.config.probes.deadControlGraceMs, 400);
+    assert.equal(log.config.timing.settleMs, 1500, 'settleMs IS the idle baseline window');
     assert.deepEqual(log.configWarnings, ['w']);
     assert.equal(log.pages[0].clickable.atEnter, 0, 'the census must round-trip, with no Set or undefined leakage');
     assert.deepEqual(log.pages[0].clickable.shadow.hosts, ['my-btn']);

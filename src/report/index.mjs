@@ -91,7 +91,22 @@ function serializableConfig(config, routes) {
       requireEffectiveSteps: config.guardrails.requireEffectiveSteps,
       forceOpenShadowRoots: config.guardrails.forceOpenShadowRoots,
     },
+    // An inert-control verdict is a function of its baseline rule, its grace
+    // window and its thresholds, so a log omitting them could not explain its own
+    // verdict — the same rule as the guardrails block above.
+    probes: {
+      deadControls: config.probes.deadControls,
+      deadControlMinObservations: config.probes.deadControlMinObservations,
+      deadControlBaselineWindows: config.probes.deadControlBaselineWindows,
+      deadControlMaxSignatures: config.probes.deadControlMaxSignatures,
+      deadControlGraceMs: config.probes.deadControlGraceMs,
+      deadControlAmbientTargets: config.probes.deadControlAmbientTargets,
+      deadControlMaxRequests: config.probes.deadControlMaxRequests,
+      deadControlObserveShadowRoots: config.probes.deadControlObserveShadowRoots,
+    },
     // gotoWaitUntil decides whether a route was even loaded before it was probed.
+    // settleMs is doubly load-bearing when deadControls is on: it IS the idle
+    // baseline window.
     timing: { gotoWaitUntil: config.timing.gotoWaitUntil, settleMs: config.timing.settleMs },
     // "no 5xx" means nothing without knowing which origins were judged.
     watchedOrigins: config.watchedOrigins || [],

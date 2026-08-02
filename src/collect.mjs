@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { normalizeReqUrl } from './inert.mjs';
 import { pathOf, stripQuery, trunc } from './util.mjs';
 
 /**
@@ -67,6 +68,26 @@ export function wireCollectors(page, state, baseOrigin, config) {
   const cap = config.report.consoleCap;
   const classify = config.network.classifyResponse || ((rec) => defaultClassifyResponse(rec, config));
   const watched = config.watchedOrigins || [baseOrigin];
+  const deadControls = !!config.probes.deadControls;
+
+  // Both listeners exist ONLY for the dead-control probe, and both are gated so a
+  // run with the probe off behaves exactly as it did before.
+  //
+  // The dialog one is a deliberate behaviour change worth reviewing: with no
+  // listener registered Playwright auto-dismisses every dialog, so this handler
+  // dismisses too and the app under test sees the same thing it always did. It is
+  // here because a control whose only effect is alert() leaves NO trace in any
+  // other channel — no DOM record, no request, no URL change — and would be
+  // accused every time.
+  if (deadControls) {
+    page.on('dialog', (d) => {
+      state.ps.inert.dialogs++;
+      d.dismiss().catch(() => {});
+    });
+    // Independent of guardrails.closePopups, which returns early when popups are
+    // not being closed: a counter registered there would be dead in that config.
+    page.on('popup', () => state.ps.inert.popups++);
+  }
 
   page.on('console', (msg) => {
     const type = msg.type();
@@ -107,7 +128,24 @@ export function wireCollectors(page, state, baseOrigin, config) {
   });
 
   const reqStart = new Map();
-  page.on('request', (r) => reqStart.set(r, Date.now()));
+  page.on('request', (r) => {
+    const t = Date.now();
+    reqStart.set(r, t);
+    // Piggy-backed on the listener that already exists — the dead-control probe
+    // needs to know a request was ISSUED, which costs nothing here and would cost
+    // a second listener anywhere else. Timestamped rather than counted because a
+    // debounced handler fires after the step pause has already ended.
+    if (!deadControls) return;
+    if (state.ps.reqLog.length >= config.probes.deadControlMaxRequests) {
+      state.ps.reqLogDropped++;
+      // Cap, then COUNT — and mark the route UNKNOWN, because a request that was
+      // never recorded cannot prove a control live, and the missing evidence
+      // points one way only: toward calling a working control dead.
+      state.ps.inert.unknown = true;
+      return;
+    }
+    state.ps.reqLog.push({ t, u: normalizeReqUrl(r.url()) });
+  });
   page.on('requestfinished', (r) => {
     const t0 = reqStart.get(r);
     reqStart.delete(r);

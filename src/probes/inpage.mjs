@@ -159,6 +159,14 @@ export function gatherCandidatesInPage({ selector, dangerSource, dangerFlags, ig
       tag: el.tagName.toLowerCase(),
       text: label.slice(0, 40),
       danger: danger.test(label),
+      // Identity, for the dead-control probe. `text` alone is empty on an
+      // icon-only button (the same blind spot a11yPassInPage counts as
+      // unlabeledButtons), and an identity of `button ""` merges every unlabeled
+      // control on the page into one — which would report the wrong control by
+      // name. `role` also decides eligibility: a <div role="button"> is a real
+      // control, a bare [tabindex] div is not.
+      id: el.id || '',
+      role: el.getAttribute('role') || '',
     });
   });
   return {
@@ -611,14 +619,99 @@ export function perfInPage() {
 }
 
 /**
+ * Read AND RESET every dead-control observable in one round trip.
+ *
+ * One evaluate, not four: this runs immediately before every judged click and
+ * once after it, so a per-observable read would be four CDP round trips per
+ * click on a page the harness is already hammering.
+ *
+ * `installed: false` is the load-bearing field. The init script may never have
+ * run — attach mode joins a tab that already loaded, and setContent-based tests
+ * never navigate — and a missing observer reads as "no mutations" which is
+ * exactly the false "dead" verdict this probe exists to refuse. The caller turns
+ * it into UNKNOWN, never into evidence.
+ *
+ * `x`/`y` are the click point on the pre-click read and null otherwise. The hit
+ * test descends OPEN shadow roots because document.elementFromPoint stops at the
+ * host: on a component app the host's tag never equals the candidate's, so every
+ * click would be dropped as "landed somewhere else".
+ */
+export function inertProbeInPage({ x, y }) {
+  const m = window.__qaMut;
+  const hash = (s) => {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  };
+  // .value / .checked / .selectedIndex are PROPERTIES, and a MutationObserver
+  // cannot see a property write at all. Without this channel, ticking a checkbox
+  // and every fill() into an uncontrolled input produce zero records, so a
+  // perfectly working field reads as dead on every single step.
+  let frm = '';
+  try {
+    for (const e of document.querySelectorAll('input,select,textarea')) {
+      frm += (e.checked ? 1 : 0) + '|' + (e.selectedIndex == null ? -1 : e.selectedIndex) + '|' + (e.value || '') + ';';
+    }
+  } catch {}
+  let hit = null;
+  if (x != null && y != null) {
+    try {
+      let el = document.elementFromPoint(x, y);
+      for (let i = 0; i < 8 && el && el.shadowRoot; i++) {
+        const inner = el.shadowRoot.elementFromPoint(x, y);
+        if (!inner || inner === el) break;
+        el = inner;
+      }
+      hit = el ? el.tagName.toLowerCase() : null;
+    } catch {}
+  }
+  const out = {
+    installed: !!m,
+    n: m ? m.n : 0,
+    sigs: m ? Object.keys(m.sigs) : [],
+    capped: m ? !!m.capped : false,
+    roots: m ? m.roots : 0,
+    docId: m ? m.docId : null,
+    frm: hash(frm),
+    opened: window.__qaOpenBlocked || 0,
+    hit,
+  };
+  if (m) {
+    m.n = 0;
+    m.sigs = {};
+    m.capped = false;
+  }
+  return out;
+}
+
+/**
  * Installed via addInitScript, so it applies to EVERY document this tab loads.
  * A plain evaluate() would be lost on the next navigation, and this harness
  * navigates constantly.
  */
-export function initScriptInPage({ blockWindowOpen, forceOpenShadowRoots }) {
+export function initScriptInPage({
+  blockWindowOpen,
+  forceOpenShadowRoots,
+  deadControls,
+  deadControlMaxSignatures,
+  deadControlObserveShadowRoots,
+}) {
+  // Always defined, even when nothing increments it, so inertProbeInPage reads a
+  // number rather than undefined on the very first sample.
+  window.__qaOpenBlocked = 0;
   if (blockWindowOpen) {
     try {
-      window.open = () => null;
+      // Counted, not just stubbed: the HARNESS is what makes an "open in new
+      // tab" control produce no DOM change, no request and no URL change, so
+      // without this the dead-control probe reports its own guardrail as the
+      // app's bug. A self-inflicted false positive, and free to remove.
+      window.open = () => {
+        window.__qaOpenBlocked++;
+        return null;
+      };
     } catch {}
   }
   // Off by default: shadowRoot.mode is observable and some libraries assert
@@ -684,4 +777,88 @@ export function initScriptInPage({ blockWindowOpen, forceOpenShadowRoots }) {
       for (const e of l.getEntries()) if (!e.hadRecentInput) window.__qaPerf.cls += e.value;
     }).observe({ type: 'layout-shift', buffered: true });
   } catch {}
+
+  // ---- dead-control detection: WHICH subtrees changed, never how many records
+  //
+  // A raw record count cannot work, and that was measured rather than assumed: a
+  // 100ms text clock produces 3 / 6 / 12 records over 300 / 600 / 1200ms of idle
+  // with nobody touching the page, while a real click that changes one text node
+  // produces exactly 1. Signal amplitude is an order of magnitude below noise, so
+  // no threshold on a counter can separate them.
+  //
+  // Signatures subtract the noise by IDENTITY instead. A clock rewriting the same
+  // node every tick is ONE signature however often it ticks, and — because a
+  // childList record targets the PARENT — a whole-subtree innerHTML re-render
+  // collapses to one signature too. The noisiest patterns real apps have are the
+  // cheapest to baseline away, which is what makes the approach viable at all.
+  // (CSS animations produce ZERO records, also measured, so animation is not a
+  // noise source here; only DOM-writing timers are.)
+  if (deadControls) {
+    window.__qaMut = {
+      n: 0,
+      sigs: {},
+      capped: false,
+      roots: 1,
+      // Identifies THIS document. addInitScript re-runs on every navigation, so
+      // the counter resets to zero on exactly the steps where the app most
+      // obviously did something; diffing across that would read a navigation as
+      // "nothing happened". Random is fine: no seeded decision reads this value,
+      // only equality with the previous sample.
+      docId: Math.random().toString(36).slice(2),
+    };
+    try {
+      const max = deadControlMaxSignatures > 0 ? deadControlMaxSignatures : 200;
+      const opts = { subtree: true, childList: true, attributes: true, characterData: true };
+      const sigOf = (rec) => {
+        let el = rec.target;
+        if (el && el.nodeType === 3) el = el.parentNode; // characterData targets the text node
+        const parts = [];
+        for (let i = 0; i < 3 && el; i++) {
+          if (el.host) el = el.host; // a ShadowRoot has no tagName; its host does
+          if (!el.tagName) break;
+          const p = el.parentNode;
+          const idx = p && p.children ? Array.prototype.indexOf.call(p.children, el) : 0;
+          parts.unshift(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + '[' + idx + ']');
+          el = el.parentNode;
+        }
+        return rec.type[0] + ':' + parts.join('>') + (rec.attributeName ? '@' + rec.attributeName : '');
+      };
+      const obs = new MutationObserver((recs) => {
+        const m = window.__qaMut;
+        for (const rec of recs) {
+          m.n++;
+          const s = sigOf(rec);
+          // Cap, then FLAG — never silently drop. A capped window is UNKNOWN, and
+          // the caller refuses to accuse anything on a route that hit this.
+          if (m.sigs[s] === undefined && Object.keys(m.sigs).length >= max) {
+            m.capped = true;
+            continue;
+          }
+          m.sigs[s] = (m.sigs[s] || 0) + 1;
+        }
+      });
+      // `document`, NOT documentElement: at addInitScript time readyState is
+      // 'loading' and documentElement does not exist yet, so observing it throws,
+      // the catch swallows it, and every click on every route reads as dead.
+      obs.observe(document, opts);
+      // Off by default, and MILDER than forceOpenShadowRoots: this never touches
+      // init.mode, so the app under test still ships the shadow roots it shipped.
+      // It is needed because a document-level observer does NOT cross a shadow
+      // boundary — measured: 0 records for a shadow-internal textContent change —
+      // and inpage.mjs's header records that shadow-blind probes already produced
+      // a false green on Lit/Stencil/Ionic. A shadow-blind mutation check would
+      // call EVERY click dead on exactly those apps.
+      if (deadControlObserveShadowRoots) {
+        const orig = Element.prototype.attachShadow;
+        Element.prototype.attachShadow = function (init) {
+          const root = orig.call(this, init);
+          try {
+            obs.observe(root, opts);
+            window.__qaMut.roots++;
+          } catch {}
+          return root;
+        };
+      }
+    } catch {}
+  }
 }
