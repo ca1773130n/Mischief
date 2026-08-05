@@ -13,6 +13,7 @@ import path from 'node:path';
 import { newRouteStats, normalizeRoute } from '../src/routes.mjs';
 import { backOff, defaultClassifyResponse } from '../src/collect.mjs';
 import { resolveConfig } from '../src/config.mjs';
+import { closeRoute, scoreRun } from '../src/inert.mjs';
 import { runMonkey } from '../src/run.mjs';
 import {
   EXIT,
@@ -605,6 +606,55 @@ test('a route the probe could not judge says so, instead of reading as cleared',
   assert.equal(f.severity, 'low');
   assert.match(f.message, /did not run on this route/);
   assert.equal(s.tot.inert, 0, 'a route that was not judged accuses nothing');
+});
+
+test('a control proven alive on a DISABLED route is cleared everywhere, not forgotten', () => {
+  // scoreRun's clearing reads o.inert === false, and o.inert is assigned only by
+  // closeRoute's final resolution loop. Every gate used to `return` before it, so
+  // a route disabled for one reason threw away its evidence about a DIFFERENT
+  // question: whether a control works. A control proven alive on a shadow-blind
+  // (or capped, or one-novel-signature-short) route carried no proof at all and
+  // stayed accusable from a quieter route.
+  //
+  // Measured on a real 13-route run: three controls had alive proof discarded this
+  // way. The gates decide whether a route may ACCUSE; they must not decide what it
+  // observed. Note the direction — this can only ever clear MORE identities, so it
+  // moves verdicts toward alive and can never manufacture an accusation.
+  const blind = ps('/a', { steps: 40, clickable: clicked() });
+  Object.assign(blind.inert, {
+    probeFailed: true, // any gate would do; this one is the cheapest to construct
+    checks: 1,
+    obs: [{ key: '#save', label: 'button#save "Save"', t0: 1, tEnd: 2, quiet: false, inert: null }],
+  });
+  const quiet = quietOn(ps('/b', { steps: 40, clickable: clicked() }), '#save', 2, { churn: ['#feed'] });
+
+  for (const r of [blind, quiet]) closeRoute(r, cfg());
+
+  assert.match(blind.inert.disabled || '', /could not be read/, 'the route is still disabled');
+  assert.equal(blind.inert.obs[0].inert, false, 'and its evidence survived the disable');
+  assert.equal(quiet.inert.disabled, null);
+
+  scoreRun([blind, quiet], cfg());
+  assert.deepEqual(quiet.inert.hits, [], '#save was proven alive on /a; it cannot be accused on /b');
+});
+
+/** The inert stats a route carries after N quiet clicks on one control. */
+function quietOn(one, key, n, over = {}) {
+  const obs = [];
+  for (let k = 0; k < n; k++) obs.push({ key, label: `button${key} "x"`, t0: 2 * k + 1, tEnd: 2 * k + 2, quiet: true, inert: null });
+  Object.assign(one.inert, { checks: n, liveClicks: 1, liveSignatures: 1, obs, ...over });
+  return one;
+}
+
+test('a disabled route still accuses nothing itself', () => {
+  // The other half of the split: resolving a disabled route's observations must
+  // not hand it back the licence the gate took away.
+  const one = quietOn(ps('/a', { steps: 40, clickable: clicked() }), '#dead', 2, { churn: [], liveSignatures: 0 });
+  closeRoute(one, cfg());
+  assert.match(one.inert.disabled || '', /cannot be shown to see this app/);
+  assert.equal(one.inert.obs[0].inert, true, 'it still resolved what it saw');
+  scoreRun([one], cfg());
+  assert.deepEqual(one.inert.hits, [], 'but a disabled route names nothing');
 });
 
 /** One monkey run over an inline page, with the dead-control probe on. */

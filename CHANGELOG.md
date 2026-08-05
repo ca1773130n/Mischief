@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.1
+
+**A control proven alive on a route the probe refused to judge is now cleared
+everywhere, instead of being forgotten.** `scoreRun` clears an identity run-wide
+on one alive observation — the README and the source both state that guarantee
+without qualification — but it reads `o.inert === false`, and `o.inert` was only
+ever assigned by `closeRoute`'s final resolution loop. Every gate returned before
+reaching it. So a route disabled for one reason silently discarded its evidence
+about an entirely different question: whether a control *works*.
+
+The effect is a false accusation two routes away. A control proven alive on a
+shadow-blind route — or a capped one, or one a single novel signature short of the
+liveness gate — carried no proof at all, and stayed accusable from a quieter route
+where it merely happened to look still. Re-checked against a real 13-route run:
+three controls had their alive proof thrown away this way.
+
+The gates now decide only whether a route may **accuse**; they no longer decide
+what it **observed**. Note the direction of the change — resolving a disabled
+route's observations can only ever add identities to the cleared set, so every
+verdict it can move, it moves toward ALIVE. It cannot manufacture an accusation.
+
+**Still unmeasured, and the promotion gates still stand.** This is a latent
+false-positive source removed by inspection, not a precision figure. It does not
+change the accusation count of either run measured so far.
+
 ## 0.2.0
 
 **New: an opt-in probe for controls wired to nothing.** `probes.deadControls`

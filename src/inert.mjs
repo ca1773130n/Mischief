@@ -247,17 +247,17 @@ export async function judgeStep(ctx, mutatorName, threw) {
 }
 
 /**
- * Close the route: decide whether it may accuse ANYTHING, then resolve the
- * network veto over each recorded click window.
+ * Why this route may not accuse anything, or null if it may.
  *
  * Three gates, all required. Each one exists because without it the detector
  * accuses a control it structurally cannot see.
+ *
+ * Separate from closeRoute so a disabled route still RESOLVES its observations.
+ * Losing the licence to accuse and losing the evidence you gathered are two
+ * different things, and conflating them cost this probe real accuracy — see the
+ * note at the resolution below.
  */
-export function closeRoute(ps, config) {
-  const i = ps && ps.inert;
-  if (!i) return;
-  const p = config.probes;
-
+function disableReason(ps, i, p) {
   // (a) SHADOW. A document-level MutationObserver does not cross a shadow
   // boundary — measured: zero records for a shadow-internal textContent change.
   // On a Lit/Stencil/Ionic app that means EVERY click reads as dead. A hard
@@ -265,36 +265,58 @@ export function closeRoute(ps, config) {
   // holding both a light-DOM control and a shadow control passes the liveness
   // gate on the former and then falsely accuses the latter.
   const sh = (ps.clickable && (ps.clickable.shadowAtEnter || ps.clickable.shadow)) || null;
-  if (!p.deadControlObserveShadowRoots && sh && (sh.openRoots > 0 || sh.closedSuspects > 0)) {
-    i.disabled =
+  if (!p.deadControlObserveShadowRoots && sh && (sh.openRoots > 0 || sh.closedSuspects > 0))
+    return (
       `${sh.openRoots} open and ${sh.closedSuspects} suspected-closed shadow root(s) are present, and the mutation ` +
       `observer cannot see inside them — a control that works inside one would read as dead ` +
-      `(probes.deadControlObserveShadowRoots: true observes them without changing the app's shadow modes)`;
-    return;
-  }
-  if (i.probeFailed) {
-    i.disabled = 'the in-page observer could not be read on this route, so absence of change is UNKNOWN rather than observed';
-    return;
-  }
-  if (i.capped) {
-    i.disabled = `more distinct DOM subtrees changed than probes.deadControlMaxSignatures (${p.deadControlMaxSignatures}) tracks, so the idle baseline cannot be trusted`;
-    return;
-  }
-  if (i.unknown) {
-    i.disabled = `the request log hit probes.deadControlMaxRequests (${p.deadControlMaxRequests}), so a request that would have proved a control live may never have been recorded`;
-    return;
-  }
-  if (!i.checks) return; // nothing eligible was clicked here; that is not a failure
+      `(probes.deadControlObserveShadowRoots: true observes them without changing the app's shadow modes)`
+    );
+  if (i.probeFailed)
+    return 'the in-page observer could not be read on this route, so absence of change is UNKNOWN rather than observed';
+  if (i.capped)
+    return `more distinct DOM subtrees changed than probes.deadControlMaxSignatures (${p.deadControlMaxSignatures}) tracks, so the idle baseline cannot be trusted`;
+  if (i.unknown)
+    return `the request log hit probes.deadControlMaxRequests (${p.deadControlMaxRequests}), so a request that would have proved a control live may never have been recorded`;
+  if (!i.checks) return null; // nothing eligible was clicked here; that is not a failure
   // (b) LIVENESS. Proof the instrument can see THIS app before any accusation
   // from it is admissible. Novel signatures specifically, not any channel: a
   // route where only navigation and form state ever fired says nothing about
   // whether the DOM channel works here.
-  if (!i.liveSignatures) {
-    i.disabled =
+  if (!i.liveSignatures)
+    return (
       `no click on this route produced a DOM change the observer had not already seen while idle, so it cannot be ` +
-      `shown to see this app at all (${i.checks} click(s) judged, ${i.churn.length} idle churn signature(s))`;
-    return;
-  }
+      `shown to see this app at all (${i.checks} click(s) judged, ${i.churn.length} idle churn signature(s))`
+    );
+  return null;
+}
+
+/**
+ * Close the route: decide whether it may accuse ANYTHING, then resolve the
+ * network veto over each recorded click window.
+ */
+export function closeRoute(ps, config) {
+  const i = ps && ps.inert;
+  if (!i) return;
+  const p = config.probes;
+  i.disabled = disableReason(ps, i, p);
+
+  // The resolution below runs even when the route is DISABLED, and that is the
+  // whole point of splitting the gates out.
+  //
+  // `o.inert === false` is this run's only record that a control WORKS, and
+  // scoreRun clears such an identity for every OTHER route too. Returning early
+  // from a gate used to leave every observation here at null, so a control proven
+  // alive on a route that happened to be shadow-blind — or capped, or one novel
+  // signature short — carried no proof at all, and stayed accusable from a quieter
+  // route where it merely looked still. The file documents the guarantee as
+  // absolute ("one alive observation ANYWHERE clears an identity for the whole
+  // run"); it silently did not hold for any disabled route.
+  //
+  // Measured on a real 13-route run: three controls had their alive proof
+  // discarded exactly this way. A disabled route must lose its licence to ACCUSE,
+  // never its evidence — and since this can only ever ADD identities to
+  // scoreRun's cleared set, it moves verdicts toward ALIVE only.
+  if (!i.obs.length) return;
 
   // Each request belongs to exactly ONE click: the most recent one whose window
   // still covers it. Click windows OVERLAP by construction — the grace is longer
